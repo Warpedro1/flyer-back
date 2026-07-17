@@ -32,7 +32,6 @@ class Settings(BaseSettings):
     DATA_PATH: str = ""
     CDC_PATH: str = ""
     LGPD_PATH: str = ""
-    CHROMA_DB_PATH: str = ""
 
     # Flyer AI defaults (AsyncOpenAI, embeddings)
     EMBEDDING_MODEL: str = "text-embedding-3-small"
@@ -40,6 +39,10 @@ class Settings(BaseSettings):
     CHAT_MODEL: str = "gpt-4o"
     CHAT_MAX_TOKENS: int = 500
     USER_INPUT_MAX_LENGTH: int = 1000
+
+    # Event media storage (private Supabase bucket; backend signs read URLs)
+    MEDIA_BUCKET: str = "event-media"
+    MEDIA_SIGNED_URL_TTL_SECONDS: int = Field(default=3600, ge=60, le=86400)
 
     # LangChain / LangGraph style aliases (default to Flyer models when unset)
     EMBEDDINGS_MODEL: str = ""
@@ -62,6 +65,25 @@ class Settings(BaseSettings):
     # Interest update weights
     INTEREST_WEIGHT_CURRENT: float = 0.7
     INTEREST_WEIGHT_NEW: float = 0.3
+    # Stronger preservation for the first K successful syncs after onboarding (Option 2 anchor)
+    INTEREST_ANCHOR_WEIGHT_CURRENT: float = 0.88
+    INTEREST_ANCHOR_WEIGHT_NEW: float = 0.12
+    SYNC_ANCHOR_COUNT: int = Field(default=5, ge=0, le=100)
+
+    # Onboarding guard / taste pipeline
+    # Gates ONLY the optional LLM judge stage; heuristics + moderation always run.
+    ENABLE_ONBOARDING_GUARDS: bool = True
+    GUARD_JUDGE_MODEL: str = ""
+    TASTE_EXTRACTOR_MODEL: str = ""
+    GUARD_MAX_INPUT_CHARS: int = Field(default=8000, ge=1000, le=50000)
+    ONBOARDING_ANSWER_MAX_CHARS: int = Field(default=400, ge=50, le=2000)
+    ONBOARDING_ANSWERS_TOTAL_MAX_CHARS: int = Field(default=2200, ge=200, le=10000)
+    ONBOARDING_ANSWER_ELABORATE_MIN_CHARS: int = Field(default=40, ge=10, le=500)
+    GUARD_JUDGE_TIMEOUT_SECONDS: float = Field(default=45.0, ge=5.0, le=120.0)
+    TASTE_EXTRACT_TIMEOUT_SECONDS: float = Field(default=45.0, ge=5.0, le=120.0)
+    MODERATION_TIMEOUT_SECONDS: float = Field(default=15.0, ge=3.0, le=60.0)
+    # Number of per-step taste docs retrieved and injected into the chat system prompt.
+    CHAT_TASTE_MATCH_COUNT: int = Field(default=4, ge=1, le=20)
 
     @model_validator(mode="after")
     def resolve_openai_and_model_aliases(self) -> Self:

@@ -3,7 +3,7 @@
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -108,6 +108,28 @@ class ChatMessageIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     content: str = Field(min_length=1, max_length=1000)
+
+
+class CompleteOnboardingIn(BaseModel):
+    """Strict key set validated in `onboarding_contract` (422 with stable codes)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    answers: dict[str, Any]
+
+
+class CompleteOnboardingOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool = True
+    steps_indexed: int = 0
+    vectorstore_skipped: bool = False
+
+
+class ValidateOnboardingOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool = True
 
 
 class ChatMessageOut(BaseModel):

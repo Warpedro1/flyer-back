@@ -22,6 +22,18 @@ class AIService:
         )
         return list(response.data[0].embedding)
 
+    async def generate_embeddings(self, texts: list[str]) -> list[list[float]]:
+        """Batch embeddings in a single request (one OpenAI call for all inputs)."""
+        if not texts:
+            return []
+        response = await self._client.embeddings.create(
+            model=settings.EMBEDDING_MODEL,
+            input=texts,
+            dimensions=settings.EMBEDDING_DIMENSIONS,
+        )
+        ordered = sorted(response.data, key=lambda d: d.index)
+        return [list(d.embedding) for d in ordered]
+
     async def chat_completion(
         self,
         system_prompt: str,
@@ -55,6 +67,40 @@ class AIService:
         a = np.asarray(current, dtype=np.float64)
         b = np.asarray(new, dtype=np.float64)
         return (a * wc + b * wn).tolist()
+
+    @staticmethod
+    def blend_interest_weighted(
+        current: list[float],
+        new: list[float],
+        weight_current: float,
+        weight_new: float,
+    ) -> list[float]:
+        """Generic convex blend (used for anchor vs organic sync)."""
+        a = np.asarray(current, dtype=np.float64)
+        b = np.asarray(new, dtype=np.float64)
+        return (a * weight_current + b * weight_new).tolist()
+
+    async def moderate_text(self, text: str) -> tuple[bool, list[str]]:
+        """Return (is_allowed, flagged_categories_or_reasons)."""
+        if not (text or "").strip():
+            return True, []
+        try:
+            resp = await self._client.moderations.create(
+                model="text-moderation-latest",
+                input=text[:8000],
+            )
+        except Exception:
+            return False, ["moderation_api_error"]
+        result = resp.results[0]
+        if result.flagged:
+            cats: list[str] = []
+            cats_obj = result.categories
+            raw = cats_obj.model_dump() if hasattr(cats_obj, "model_dump") else dict(cats_obj)
+            for name, flagged in raw.items():
+                if flagged:
+                    cats.append(str(name))
+            return False, cats or ["moderation_flagged"]
+        return True, []
 
 
 ai_service = AIService()

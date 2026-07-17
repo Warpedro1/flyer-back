@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.models.schemas import ChatSender, EventMediaRead, FollowStatus, MediaType
 
 REST_PREFIX = "/rest/v1"
+STORAGE_PREFIX = "/storage/v1"
 
 POSTGRES_UNIQUE_VIOLATION = "23505"
 
@@ -194,6 +195,79 @@ class DBService:
             return rows[0]
         return None
 
+    async def get_or_create_profile(self, user_id: str, jwt: str) -> dict[str, Any]:
+        """Ensure a `profiles` row exists for this user (required for onboarding + embeddings)."""
+        row = await self.get_profile(user_id, jwt)
+        if row is not None:
+            return row
+        ins = await self._client.post(
+            f"{REST_PREFIX}/profiles",
+            json={"id": user_id},
+            headers={
+                **self._user_headers(jwt),
+                "Prefer": "return=representation",
+            },
+        )
+        if ins.status_code == 409:
+            row2 = await self.get_profile(user_id, jwt)
+            if row2 is not None:
+                return row2
+        await self._raise_for_supabase(ins)
+        created = ins.json()
+        if isinstance(created, list) and created:
+            return created[0]
+        if isinstance(created, dict):
+            return created
+        msg = "Could not create profile row"
+        raise RuntimeError(msg)
+
+    async def increment_interest_sync_count(self, user_id: str, jwt: str) -> int:
+        """Atomically increment via RPC when migration is applied; otherwise R-M-W fallback."""
+        r = await self._client.post(
+            f"{REST_PREFIX}/rpc/increment_interest_sync_count",
+            json={"p_user_id": user_id},
+            headers=self._admin_headers(),
+        )
+        if r.status_code == 404:
+            return await self._increment_interest_sync_count_fallback(user_id, jwt)
+        await self._raise_for_supabase(r)
+        val = r.json()
+        if isinstance(val, int):
+            return val
+        if isinstance(val, str) and val.lstrip("-").isdigit():
+            return int(val)
+        return -1
+
+    async def _increment_interest_sync_count_fallback(self, user_id: str, jwt: str) -> int:
+        """Compare-and-swap increment when the RPC is unavailable.
+
+        PostgREST cannot express ``col = col + 1``, so we read the value and PATCH
+        only the row whose count is still ``cur`` (filtered update), retrying when a
+        concurrent writer wins the race. This avoids the lost-update bug of a plain
+        read-modify-write under concurrent syncs.
+        """
+        for _ in range(5):
+            prof = await self.get_profile(user_id, jwt)
+            if prof is None:
+                return -1
+            cur = int(prof.get("interest_sync_count_after_onboarding") or 0)
+            nxt = cur + 1
+            r = await self._client.patch(
+                f"{REST_PREFIX}/profiles",
+                params={
+                    "id": f"eq.{user_id}",
+                    "interest_sync_count_after_onboarding": f"eq.{cur}",
+                },
+                json={"interest_sync_count_after_onboarding": nxt},
+                headers={**self._user_headers(jwt), "Prefer": "return=representation"},
+            )
+            await self._raise_for_supabase(r)
+            updated = r.json()
+            if isinstance(updated, list) and updated:
+                return nxt
+            # Another writer advanced the counter between read and write; retry.
+        return -1
+
     async def update_profile(
         self,
         user_id: str,
@@ -250,6 +324,88 @@ class DBService:
             return data
         return []
 
+    async def upsert_user_taste_documents(
+        self,
+        user_id: str,
+        items: list[dict[str, Any]],
+    ) -> int:
+        """Upsert per-step taste docs (idempotent on the (user_id, step_key) unique key)."""
+        if not items:
+            return 0
+        r = await self._client.post(
+            f"{REST_PREFIX}/user_taste_documents",
+            params={"on_conflict": "user_id,step_key"},
+            json=items,
+            headers={
+                **self._admin_headers(),
+                "Prefer": "resolution=merge-duplicates,return=minimal",
+            },
+        )
+        await self._raise_for_supabase(r)
+        return len(items)
+
+    async def match_user_taste_documents(
+        self,
+        user_id: str,
+        query_embedding: list[float],
+        match_count: int = 4,
+    ) -> list[dict[str, Any]]:
+        """RPC: top taste docs for this user by cosine similarity to the query vector."""
+        r = await self._client.post(
+            f"{REST_PREFIX}/rpc/match_user_taste_documents",
+            json={
+                "p_user_id": user_id,
+                "query_embedding": query_embedding,
+                "match_count": match_count,
+            },
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+        data = r.json()
+        if isinstance(data, list):
+            return data
+        return []
+
+    async def sign_media_paths(self, paths: list[str]) -> dict[str, str]:
+        """Map private Storage paths -> short-lived signed URLs (service_role).
+
+        Values that are already absolute URLs (legacy `http(s)://` media) pass through
+        unchanged. Paths that fail to sign are simply omitted (caller keeps the raw path).
+        """
+        out: dict[str, str] = {}
+        to_sign: list[str] = []
+        for p in paths:
+            if not p:
+                continue
+            if p.startswith("http://") or p.startswith("https://"):
+                out[p] = p
+            elif p not in out and p not in to_sign:
+                to_sign.append(p)
+        if not to_sign:
+            return out
+
+        r = await self._client.post(
+            f"{STORAGE_PREFIX}/object/sign/{settings.MEDIA_BUCKET}",
+            json={"expiresIn": settings.MEDIA_SIGNED_URL_TTL_SECONDS, "paths": to_sign},
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+        data = r.json()
+        base = settings.SUPABASE_URL.rstrip("/")
+        if isinstance(data, list):
+            for entry in data:
+                if not isinstance(entry, dict):
+                    continue
+                path = entry.get("path")
+                signed = entry.get("signedURL") or entry.get("signedUrl")
+                if not path or not signed:
+                    continue
+                signed_str = str(signed)
+                out[str(path)] = (
+                    f"{base}{STORAGE_PREFIX}{signed_str}" if signed_str.startswith("/") else signed_str
+                )
+        return out
+
     async def batch_fetch_event_media(
         self,
         event_ids: list[str],
@@ -273,6 +429,10 @@ class DBService:
         if not isinstance(rows, list):
             return {}
 
+        # Stored media_url is a private Storage path; mint short-lived signed URLs.
+        paths = [str(row["media_url"]) for row in rows if row.get("media_url")]
+        signed = await self.sign_media_paths(paths)
+
         by_event: dict[str, list[EventMediaRead]] = {}
         for row in rows:
             eid = row.get("event_id")
@@ -286,9 +446,10 @@ class DBService:
                 media_type = MediaType(str(raw_type))
             except ValueError:
                 continue
+            raw_url = str(row["media_url"])
             item = EventMediaRead(
                 id=str(row["id"]),
-                media_url=str(row["media_url"]),
+                media_url=signed.get(raw_url, raw_url),
                 type=media_type,
                 order_index=int(row.get("order_index") or 0),
             )
