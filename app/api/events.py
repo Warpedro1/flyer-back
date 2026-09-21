@@ -13,9 +13,11 @@ from app.core.limiter import limiter
 from app.models.schemas import (
     EMBEDDING_DIMENSIONS,
     DiscoverRequest,
+    EventCapacityRead,
     EventCreate,
     EventMediaRead,
     EventRead,
+    RsvpStatus,
 )
 from app.services.ai_service import ai_service
 from app.services.event_recurrence import expand_recurrence
@@ -76,7 +78,11 @@ def _parse_decimal(value: Any) -> Decimal | None:
     return Decimal(str(value))
 
 
-def _row_to_event_read(row: dict[str, Any], media: list[EventMediaRead]) -> EventRead:
+def _row_to_event_read(
+    row: dict[str, Any],
+    media: list[EventMediaRead],
+    capacity_state: EventCapacityRead | None = None,
+) -> EventRead:
     return EventRead(
         id=str(row["id"]),
         creator_id=str(row["creator_id"]) if row.get("creator_id") is not None else None,
@@ -90,6 +96,11 @@ def _row_to_event_read(row: dict[str, Any], media: list[EventMediaRead]) -> Even
         price=_parse_decimal(row.get("price")),
         rating=_parse_decimal(row.get("rating")),
         attendee_count=int(row.get("attendee_count") or 0),
+        # `.get` with defaults: rows predating the capacity migration lack these keys.
+        capacity=int(row["capacity"]) if row.get("capacity") is not None else None,
+        waitlist_enabled=bool(row.get("waitlist_enabled", True)),
+        call_ttl_minutes=int(row.get("call_ttl_minutes") or 10),
+        capacity_state=capacity_state,
         is_boosted=bool(row.get("is_boosted", False)),
         boost_expires_at=_parse_dt(row.get("boost_expires_at")),
         created_at=_parse_dt(row.get("created_at")),
@@ -213,6 +224,12 @@ async def create_event(
     }
     if body.price is not None:
         base_payload["price"] = str(body.price)
+    # capacity None = unlimited event; the other three only matter once it is set,
+    # but storing them unconditionally keeps every occurrence row self-describing.
+    base_payload["capacity"] = body.capacity
+    base_payload["waitlist_enabled"] = body.waitlist_enabled
+    base_payload["call_ttl_minutes"] = body.call_ttl_minutes
+    base_payload["auto_call_next"] = body.auto_call_next
 
     occurrences = _event_occurrences(body)
     if not occurrences:
@@ -283,6 +300,43 @@ async def events_health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+async def _capacity_state(
+    db: DbServiceDep,
+    event_id: str,
+    user_id: str,
+    jwt: str,
+    row: dict[str, Any],
+) -> EventCapacityRead:
+    """Capacity snapshot for one event, from the requesting user's point of view.
+
+    Only computed on the single-event route: doing it per row in discovery would
+    be three extra round-trips per result.
+    """
+    await db.sweep_expired_calls(event_id)
+    capacity = row.get("capacity")
+    taken = await db.count_rsvps_by_status(
+        event_id,
+        [
+            RsvpStatus.confirmed.value,
+            RsvpStatus.called.value,
+            RsvpStatus.admitted.value,
+        ],
+        jwt,
+    )
+    waitlist_count = await db.count_rsvps_by_status(
+        event_id, [RsvpStatus.waitlisted.value], jwt
+    )
+    mine = await db.get_rsvp(event_id, user_id, jwt)
+    my_status = RsvpStatus(str(mine["status"])) if mine else None
+    return EventCapacityRead(
+        capacity=int(capacity) if capacity is not None else None,
+        taken=taken,
+        waitlist_count=waitlist_count,
+        my_status=my_status,
+        my_waitlist_position=mine.get("waitlist_position") if mine else None,
+    )
+
+
 @router.get("/{event_id}", response_model=EventRead)
 @limiter.limit("30/minute")
 async def get_event(
@@ -292,10 +346,11 @@ async def get_event(
     auth: Annotated[tuple[str, str], Depends(get_current_user_with_token)],
 ) -> EventRead:
     """Return a single event by ID."""
-    _user_id, jwt = auth
+    user_id, jwt = auth
     row = await db.get_event_by_id(event_id, jwt)
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found.")
     media_map = await db.batch_fetch_event_media([event_id], jwt)
     media = media_map.get(event_id, [])
-    return _row_to_event_read(row, media)
+    capacity_state = await _capacity_state(db, event_id, user_id, jwt, row)
+    return _row_to_event_read(row, media, capacity_state)

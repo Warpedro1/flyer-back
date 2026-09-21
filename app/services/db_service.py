@@ -20,6 +20,20 @@ class UniqueViolationError(Exception):
     """Raised when PostgreSQL reports unique constraint violation (code 23505)."""
 
 
+class RpcError(Exception):
+    """A PL/pgSQL ``RAISE`` surfaced by PostgREST.
+
+    The RSVP functions signal domain outcomes (``event_full``, ``not_event_creator``,
+    ...) by raising; the routers map ``message`` onto an HTTP status. Keyed on the
+    message rather than SQLSTATE because several raises share a code.
+    """
+
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
 def _json_headers() -> dict[str, str]:
     return {
         "Content-Type": "application/json",
@@ -900,3 +914,230 @@ class DBService:
         await self._raise_for_supabase(r)
         rows = r.json()
         return rows if isinstance(rows, list) else []
+
+    # ------------------------------------------------------------------ RSVP --
+    # Every queue write goes through a SECURITY DEFINER function: PostgREST has no
+    # multi-statement transaction, so "count the seats then decide" over two
+    # requests lets two people through the last seat at once.
+
+    @staticmethod
+    def _rpc_message(response: httpx.Response) -> str | None:
+        try:
+            data = response.json()
+        except Exception:
+            return None
+        if isinstance(data, dict):
+            msg = data.get("message")
+            if isinstance(msg, str):
+                return msg
+        return None
+
+    async def _raise_for_rpc(self, response: httpx.Response) -> None:
+        """Translate a failed RSVP RPC into RpcError / UniqueViolationError."""
+        if response.is_success:
+            return
+        code = self._extract_pg_code(response)
+        if code == POSTGRES_UNIQUE_VIOLATION:
+            raise UniqueViolationError from None
+        message = self._rpc_message(response)
+        if message:
+            raise RpcError(message, code) from None
+        response.raise_for_status()
+
+    @staticmethod
+    def _single_rsvp(payload: Any) -> dict[str, Any] | None:
+        """RPCs returning `event_rsvps` give an object, a 1-item list, or null."""
+        if isinstance(payload, list):
+            payload = payload[0] if payload else None
+        if isinstance(payload, dict) and payload.get("id"):
+            return payload
+        return None
+
+    async def _call_rsvp_rpc(
+        self,
+        name: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        r = await self._client.post(
+            f"{REST_PREFIX}/rpc/{name}",
+            json=params,
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_rpc(r)
+        return self._single_rsvp(r.json())
+
+    async def sweep_expired_calls(self, event_id: str) -> int:
+        """Expire overdue calls and auto-call the next in line. Idempotent.
+
+        There is no scheduler in this backend, so expiry is lazy: every read and
+        write of the queue runs this first, which is what keeps a no-show from
+        blocking everyone behind them.
+        """
+        r = await self._client.post(
+            f"{REST_PREFIX}/rpc/rsvp_sweep_expired_calls",
+            json={"p_event_id": event_id},
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_rpc(r)
+        val = r.json()
+        return val if isinstance(val, int) else 0
+
+    async def rsvp_join(self, event_id: str, user_id: str) -> dict[str, Any] | None:
+        """Confirm a seat, or append to the waitlist when the event is full."""
+        return await self._call_rsvp_rpc(
+            "rsvp_join", {"p_event_id": event_id, "p_user_id": user_id}
+        )
+
+    async def rsvp_cancel(self, event_id: str, user_id: str) -> dict[str, Any] | None:
+        """Drop out; a freed seat promotes the head of the waitlist."""
+        return await self._call_rsvp_rpc(
+            "rsvp_cancel", {"p_event_id": event_id, "p_user_id": user_id}
+        )
+
+    async def rsvp_call_next(
+        self, event_id: str, creator_id: str
+    ) -> dict[str, Any] | None:
+        """Call the first person in the queue. None when the queue is empty."""
+        return await self._call_rsvp_rpc(
+            "rsvp_call_next", {"p_event_id": event_id, "p_creator_id": creator_id}
+        )
+
+    async def rsvp_recall(
+        self, event_id: str, rsvp_id: str, creator_id: str
+    ) -> dict[str, Any] | None:
+        """Give a no-show a fresh call window (they turned up late)."""
+        return await self._call_rsvp_rpc(
+            "rsvp_recall",
+            {"p_event_id": event_id, "p_rsvp_id": rsvp_id, "p_creator_id": creator_id},
+        )
+
+    async def rsvp_admit(
+        self, rsvp_id: str, event_id: str, jti: str
+    ) -> dict[str, Any] | None:
+        """Burn the QR nonce and mark the attendee admitted, atomically."""
+        return await self._call_rsvp_rpc(
+            "rsvp_admit",
+            {"p_rsvp_id": rsvp_id, "p_event_id": event_id, "p_jti": jti},
+        )
+
+    async def get_rsvp(
+        self, event_id: str, user_id: str, jwt: str
+    ) -> dict[str, Any] | None:
+        """Return this user's RSVP for the event, or None if never joined."""
+        r = await self._client.get(
+            f"{REST_PREFIX}/event_rsvps",
+            params={
+                "event_id": f"eq.{event_id}",
+                "user_id": f"eq.{user_id}",
+                "select": "*",
+                "limit": "1",
+            },
+            headers=self._user_headers(jwt),
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        if isinstance(rows, list) and rows:
+            return rows[0]
+        return None
+
+    async def get_event_rsvps(
+        self, event_id: str, jwt: str
+    ) -> list[dict[str, Any]]:
+        """Every RSVP of an event with the attendee profile, queue order first."""
+        r = await self._client.get(
+            f"{REST_PREFIX}/event_rsvps",
+            params={
+                "event_id": f"eq.{event_id}",
+                "select": "*,profiles(id,name,email)",
+                "order": "waitlist_position.asc.nullslast,created_at.asc",
+            },
+            headers=self._user_headers(jwt),
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        return rows if isinstance(rows, list) else []
+
+    async def count_rsvps_by_status(
+        self, event_id: str, statuses: list[str], jwt: str
+    ) -> int:
+        """Exact count without pulling the rows (PostgREST Prefer: count=exact)."""
+        if not statuses:
+            return 0
+        joined = ",".join(statuses)
+        r = await self._client.get(
+            f"{REST_PREFIX}/event_rsvps",
+            params={
+                "event_id": f"eq.{event_id}",
+                "status": f"in.({joined})",
+                "select": "id",
+            },
+            headers={
+                **self._user_headers(jwt),
+                "Prefer": "count=exact",
+                "Range-Unit": "items",
+                "Range": "0-0",
+            },
+        )
+        await self._raise_for_supabase(r)
+        content_range = r.headers.get("content-range", "")
+        total = content_range.rsplit("/", 1)[-1]
+        return int(total) if total.isdigit() else 0
+
+    async def count_waitlist_ahead(
+        self, event_id: str, position: int, jwt: str
+    ) -> int:
+        """How many people are still queued ahead of `position`."""
+        r = await self._client.get(
+            f"{REST_PREFIX}/event_rsvps",
+            params={
+                "event_id": f"eq.{event_id}",
+                "status": "eq.waitlisted",
+                "waitlist_position": f"lt.{position}",
+                "select": "id",
+            },
+            headers={
+                **self._user_headers(jwt),
+                "Prefer": "count=exact",
+                "Range-Unit": "items",
+                "Range": "0-0",
+            },
+        )
+        await self._raise_for_supabase(r)
+        content_range = r.headers.get("content-range", "")
+        total = content_range.rsplit("/", 1)[-1]
+        return int(total) if total.isdigit() else 0
+
+    async def get_rsvp_by_id(
+        self, rsvp_id: str, event_id: str, jwt: str
+    ) -> dict[str, Any] | None:
+        """Single RSVP scoped to its event (so an id alone cannot cross events)."""
+        r = await self._client.get(
+            f"{REST_PREFIX}/event_rsvps",
+            params={
+                "id": f"eq.{rsvp_id}",
+                "event_id": f"eq.{event_id}",
+                "select": "*",
+                "limit": "1",
+            },
+            headers=self._user_headers(jwt),
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        if isinstance(rows, list) and rows:
+            return rows[0]
+        return None
+
+    async def get_rsvp_profile(
+        self, user_id: str, jwt: str
+    ) -> dict[str, Any] | None:
+        """Public profile of an attendee, to name them on the scanner screen."""
+        r = await self._client.get(
+            f"{REST_PREFIX}/profiles",
+            params={"id": f"eq.{user_id}", "select": "id,name,email", "limit": "1"},
+            headers=self._user_headers(jwt),
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        if isinstance(rows, list) and rows:
+            return rows[0]
+        return None
