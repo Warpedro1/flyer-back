@@ -25,6 +25,21 @@ class MediaType(str, Enum):
     video = "video"
 
 
+class RsvpStatus(str, Enum):
+    """Maps to Postgres enum `rsvp_status`.
+
+    Occupancy is `confirmed` + `called` + `admitted`; `waitlisted`, `no_show`
+    and `cancelled` hold no seat.
+    """
+
+    confirmed = "confirmed"
+    waitlisted = "waitlisted"
+    called = "called"
+    admitted = "admitted"
+    no_show = "no_show"
+    cancelled = "cancelled"
+
+
 class FollowStatus(str, Enum):
     """Maps to Postgres enum `follow_status` (reject = DELETE row, no rejected value)."""
 
@@ -85,6 +100,10 @@ class EventRead(BaseModel):
     price: Decimal | None = None
     rating: Decimal | None = None
     attendee_count: int = Field(default=0, ge=0)
+    capacity: int | None = Field(default=None, gt=0)
+    waitlist_enabled: bool = True
+    call_ttl_minutes: int = Field(default=10, ge=1, le=240)
+    capacity_state: "EventCapacityRead | None" = None
     is_boosted: bool = False
     boost_expires_at: datetime | None = None
     created_at: datetime | None = None
@@ -338,3 +357,86 @@ class EventCreate(BaseModel):
     price: Decimal | None = Field(default=None, ge=0)
     media: list[EventMediaCreate] = Field(default_factory=list, max_length=10)
     recurrence: EventRecurrence | None = None
+    # None = no limit: everybody joins as `confirmed` and the waitlist is never used.
+    capacity: int | None = Field(default=None, gt=0)
+    waitlist_enabled: bool = True
+    call_ttl_minutes: int = Field(default=10, ge=1, le=240)
+    auto_call_next: bool = True
+
+
+class RsvpRead(BaseModel):
+    """A single row of `event_rsvps`, as returned to the attendee or the creator."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    event_id: str
+    user_id: str
+    status: RsvpStatus
+    waitlist_position: int | None = None
+    ahead_count: int | None = None
+    called_at: datetime | None = None
+    call_expires_at: datetime | None = None
+    admitted_at: datetime | None = None
+    created_at: datetime | None = None
+
+
+class RsvpWithProfile(RsvpRead):
+    """Queue entry with the attendee's public profile (creator-facing lists)."""
+
+    profile: ProfileBrief
+
+
+class EventCapacityRead(BaseModel):
+    """Capacity snapshot embedded in `EventRead` for the requesting user."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    capacity: int | None = None
+    taken: int = Field(default=0, ge=0)
+    waitlist_count: int = Field(default=0, ge=0)
+    my_status: RsvpStatus | None = None
+    my_waitlist_position: int | None = None
+
+
+class AttendeeListRead(BaseModel):
+    """Full queue view for the event creator."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    capacity: int | None = None
+    taken: int = Field(default=0, ge=0)
+    confirmed: list[RsvpWithProfile] = Field(default_factory=list)
+    called: list[RsvpWithProfile] = Field(default_factory=list)
+    waitlist: list[RsvpWithProfile] = Field(default_factory=list)
+    no_show: list[RsvpWithProfile] = Field(default_factory=list)
+
+
+class RsvpQrToken(BaseModel):
+    """Short-lived admission token the attendee renders as a QR code."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str
+    expires_at: datetime
+
+
+class ScanRequest(BaseModel):
+    """Token read off an attendee's QR code by the creator's camera."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=1, max_length=2000)
+
+
+class ScanResult(BaseModel):
+    """Outcome of a successful admission."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool = True
+    status: RsvpStatus
+    attendee: ProfileBrief
+
+
+EventRead.model_rebuild()
