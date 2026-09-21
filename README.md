@@ -88,6 +88,41 @@ uvicorn app.main:app --reload
 
 Default local URL: `http://127.0.0.1:8000`
 
+## Rodar o Flyer inteiro (backend + frontend)
+
+O Flyer são **dois processos**: esta API e o frontend (`Flyer/`). O browser abre o
+frontend; é o frontend que fala com esta API. Abrir `http://127.0.0.1:8000`
+diretamente só mostra o health check.
+
+**Terminal 1 — backend (este repositório):**
+
+```bash
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt   # Windows: .venv\Scripts\pip install -r requirements.txt
+cp .env.example .env                        # e preencher
+.venv/bin/uvicorn app.main:app --reload     # Windows: .venv\Scripts\uvicorn app.main:app --reload
+```
+
+**Terminal 2 — frontend (`Flyer/`):**
+
+```bash
+npm install
+npm run dev
+```
+
+Depois abrir **http://localhost:5173**. O `VITE_API_BASE_URL` no `.env` do
+frontend tem de apontar para `http://127.0.0.1:8000`.
+
+Confirmar que o backend está de pé antes de abrir a app:
+
+```bash
+curl http://127.0.0.1:8000/health      # {"status":"ok","chat_model":"gpt-4o"}
+```
+
+Se a app abre mas todos os pedidos falham com 500, o backend está a arrancar bem
+mas não chega ao Supabase — verificar `SUPABASE_URL` / `SUPABASE_KEY` e o acesso
+de rede ao projeto Supabase.
+
 ## Health endpoints
 
 - `GET /`
