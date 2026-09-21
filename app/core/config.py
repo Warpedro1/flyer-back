@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     CHAT_MAX_TOKENS: int = 500
     USER_INPUT_MAX_LENGTH: int = 1000
 
+    # Event RSVP / waitlist / QR admission
+    # Own secret, deliberately NOT SUPABASE_JWT_SECRET: a QR token is a door key,
+    # not a session. When empty the QR endpoints answer 503 (feature off).
+    RSVP_QR_SECRET: str = ""
+    # Short enough that a photo of someone else's screen is useless by the door.
+    RSVP_QR_TTL_SECONDS: int = Field(default=45, ge=15, le=300)
+    RSVP_CALL_TTL_MINUTES_DEFAULT: int = Field(default=10, ge=1, le=240)
+
     # Event media storage (private Supabase bucket; backend signs read URLs)
     MEDIA_BUCKET: str = "event-media"
     MEDIA_SIGNED_URL_TTL_SECONDS: int = Field(default=3600, ge=60, le=86400)
