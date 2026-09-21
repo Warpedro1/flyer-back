@@ -1,11 +1,12 @@
 """Pydantic schemas for Flyer API contracts."""
 
-from datetime import datetime
+import re
+from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 EMBEDDING_DIMENSIONS = 1536
 
@@ -253,6 +254,75 @@ class EventMediaCreate(BaseModel):
     order_index: int = 0
 
 
+class RecurrenceMode(str, Enum):
+    """How a recurring event expands into concrete occurrences."""
+
+    count = "count"      # repeat every day/week, N times
+    weekly = "weekly"    # on chosen weekdays at a time, until a date
+    range = "range"      # daily between a start and end date
+
+
+_HHMM_RE = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
+
+
+class EventRecurrence(BaseModel):
+    """Recurrence spec; the backend expands it into multiple event rows (cap: 60)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: RecurrenceMode
+
+    # mode == count
+    every: Literal["day", "week"] | None = None
+    occurrences: int | None = Field(default=None, ge=2, le=60)
+
+    # mode == weekly (0 = Monday … 6 = Sunday)
+    weekdays: list[int] | None = None
+    time_of_day: str | None = None  # "HH:MM" (24h)
+    until: date | None = None
+
+    # mode == range
+    start: date | None = None
+    end: date | None = None
+
+    @field_validator("time_of_day")
+    @classmethod
+    def _valid_time(cls, v: str | None) -> str | None:
+        if v is not None and not _HHMM_RE.fullmatch(v):
+            msg = "time_of_day must be HH:MM (24h)"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("weekdays")
+    @classmethod
+    def _valid_weekdays(cls, v: list[int] | None) -> list[int] | None:
+        if v is None:
+            return v
+        if not v or any(d < 0 or d > 6 for d in v):
+            msg = "weekdays must be a non-empty list of integers 0..6"
+            raise ValueError(msg)
+        return sorted(set(v))
+
+    @model_validator(mode="after")
+    def _require_fields_per_mode(self) -> "EventRecurrence":
+        if self.mode == RecurrenceMode.count:
+            if self.every is None or self.occurrences is None:
+                msg = "count recurrence requires 'every' and 'occurrences'"
+                raise ValueError(msg)
+        elif self.mode == RecurrenceMode.weekly:
+            if not self.weekdays or self.time_of_day is None or self.until is None:
+                msg = "weekly recurrence requires 'weekdays', 'time_of_day' and 'until'"
+                raise ValueError(msg)
+        elif self.mode == RecurrenceMode.range:
+            if self.start is None or self.end is None or self.time_of_day is None:
+                msg = "range recurrence requires 'start', 'end' and 'time_of_day'"
+                raise ValueError(msg)
+            if self.end < self.start:
+                msg = "range 'end' must be on or after 'start'"
+                raise ValueError(msg)
+        return self
+
+
 class EventCreate(BaseModel):
     """Payload for creating a new event."""
 
@@ -267,3 +337,4 @@ class EventCreate(BaseModel):
     event_date: datetime | None = None
     price: Decimal | None = Field(default=None, ge=0)
     media: list[EventMediaCreate] = Field(default_factory=list, max_length=10)
+    recurrence: EventRecurrence | None = None

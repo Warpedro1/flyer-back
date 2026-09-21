@@ -745,6 +745,54 @@ class DBService:
         msg = "Could not create event row"
         raise RuntimeError(msg)
 
+    async def create_events_bulk(
+        self,
+        creator_id: str,
+        rows: list[dict[str, Any]],
+        jwt: str,
+    ) -> list[dict[str, Any]]:
+        """Insert one or more event rows in a single request; return created records.
+
+        Used for both single-create and recurrence expansion (a list of length 1..N).
+        """
+        if not rows:
+            return []
+        payload = [{**row, "creator_id": creator_id} for row in rows]
+        r = await self._client.post(
+            f"{REST_PREFIX}/events",
+            json=payload,
+            headers={
+                **self._user_headers(jwt),
+                "Prefer": "return=representation",
+            },
+        )
+        await self._raise_for_supabase(r)
+        created = r.json()
+        if isinstance(created, list):
+            return created
+        if isinstance(created, dict):
+            return [created]
+        return []
+
+    async def upsert_events(self, rows: list[dict[str, Any]]) -> int:
+        """Idempotent upsert of ingested events (conflict on source + source_event_id).
+
+        Uses the service_role key (global/system write, no per-user RLS scope).
+        """
+        if not rows:
+            return 0
+        r = await self._client.post(
+            f"{REST_PREFIX}/events",
+            params={"on_conflict": "source,source_event_id"},
+            json=rows,
+            headers={
+                **self._admin_headers(),
+                "Prefer": "resolution=merge-duplicates,return=minimal",
+            },
+        )
+        await self._raise_for_supabase(r)
+        return len(rows)
+
     async def insert_event_media(
         self,
         event_id: str,
@@ -763,10 +811,33 @@ class DBService:
             }
             for idx, m in enumerate(media_items)
         ]
+        await self.insert_event_media_rows(rows, jwt)
+
+    async def insert_event_media_rows(
+        self,
+        rows: list[dict[str, Any]],
+        jwt: str,
+    ) -> None:
+        """Bulk-insert pre-built media rows (each already carries its own event_id)."""
+        if not rows:
+            return
         r = await self._client.post(
             f"{REST_PREFIX}/event_media",
             json=rows,
             headers=self._user_headers(jwt),
+        )
+        await self._raise_for_supabase(r)
+
+    async def set_events_embedding(self, event_ids: list[str], vector: list[float]) -> None:
+        """Set the same interest embedding on the given events (for vector discovery)."""
+        if not event_ids:
+            return
+        joined = ",".join(event_ids)
+        r = await self._client.patch(
+            f"{REST_PREFIX}/events",
+            params={"id": f"in.({joined})"},
+            json={"embedding": vector},
+            headers=self._admin_headers(),
         )
         await self._raise_for_supabase(r)
 

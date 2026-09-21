@@ -72,8 +72,20 @@ async def run_complete_onboarding_pipeline(
     store_text = prefs_md if prefs_md.strip() else canonical[: settings.ONBOARDING_ANSWERS_TOTAL_MAX_CHARS]
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-    embedding_vec = await ai_service.generate_embedding(canonical)
-    doc_vecs = await ai_service.generate_embeddings([d.page_content for d in documents])
+    # Embedding generation is the one step that depends on an external provider
+    # (OpenAI). Surface its failure with a stable code instead of a generic 500,
+    # so a missing/invalid OPENAI key doesn't silently leave the profile vector-less.
+    try:
+        embedding_vec = await ai_service.generate_embedding(canonical)
+        doc_vecs = await ai_service.generate_embeddings([d.page_content for d in documents])
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Onboarding embedding generation failed (user_id=%s)", user_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": "embedding_generation_failed"},
+        ) from None
     taste_items = [
         {
             "user_id": user_id,
@@ -115,3 +127,31 @@ async def run_complete_onboarding_pipeline(
         steps_indexed=len(taste_items),
         vectorstore_skipped=False,
     )
+
+
+async def ensure_interest_embedding(
+    db: DBService,
+    user_id: str,
+    jwt: str,  # noqa: ARG001 (kept for signature parity with other user-scoped helpers)
+    profile: dict[str, Any],
+) -> list[float] | None:
+    """Lazy backfill: rebuild `interest_embedding` from stored preferences text when missing.
+
+    Users who onboarded before the pipeline existed (or whose embedding write failed)
+    keep a valid `onboarding_preferences_text` but no vector, which made discovery hard-fail
+    with 400. When we can reconstruct it, we generate the embedding from that text, persist
+    it (service_role), and return it. Returns None when there is nothing to rebuild from.
+    """
+    prefs_raw = profile.get("onboarding_preferences_text")
+    text = str(prefs_raw).strip() if prefs_raw else ""
+    if not text:
+        return None
+    try:
+        vec = await ai_service.generate_embedding(text)
+    except Exception:
+        logger.exception("Lazy interest-embedding rebuild failed (user_id=%s)", user_id)
+        return None
+    if not vec:
+        return None
+    await db.update_profile_embedding(user_id, vec)
+    return vec

@@ -47,6 +47,24 @@ class AIService:
         content = completion.choices[0].message.content
         return content or ""
 
+    async def json_completion(
+        self,
+        system_prompt: str,
+        user_content: str,
+        model: str,
+    ) -> str:
+        """Chat completion constrained to a JSON object (used by the ETL transform stage)."""
+        completion = await self._client.chat.completions.create(
+            model=model,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+        )
+        content = completion.choices[0].message.content
+        return content or ""
+
     @staticmethod
     def blend_vectors(
         personal: list[float],
