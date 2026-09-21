@@ -1,8 +1,14 @@
 # Próximo passo — Lotação, lista de espera e check-in por QR
 
-> Estado: **especificação**, ainda não implementado.
+> Estado: **implementado**. Este documento fica como registo do desenho e das
+> decisões; o código é a fonte da verdade a partir daqui.
 > Escopo: backend (`FlyerBack`). O lado do cliente está em
 > `Flyer/docs/roadmap/capacity-waitlist-qr.md` e consome os contratos daqui.
+>
+> Falta um passo manual: aplicar
+> `supabase/migrations/20260921000000_event_capacity_waitlist.sql` no Supabase e
+> definir `RSVP_QR_SECRET` no `.env` — sem o segredo os endpoints de QR
+> respondem 503 de propósito.
 
 ## Objetivo
 
