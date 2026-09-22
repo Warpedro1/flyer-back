@@ -46,8 +46,12 @@ python -m venv .venv
 2. Install dependencies:
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
+
+`requirements.txt` só tem o que a produção precisa — é o que a Vercel instala na
+função, e o limite são 250 MB descompactados. O `requirements-dev.txt` inclui-o
+e acrescenta o `uvicorn` e o `pytest`.
 
 3. Create your local environment file:
 

@@ -1,0 +1,9 @@
+# Desenvolvimento e testes. Instalar com: pip install -r requirements-dev.txt
+-r requirements.txt
+
+# Servidor local. Na Vercel não é preciso: a plataforma traz o seu próprio
+# adaptador ASGI, e o uvicorn[standard] traz uvloop/httptools (~15 MB).
+uvicorn[standard]>=0.27.0
+
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
