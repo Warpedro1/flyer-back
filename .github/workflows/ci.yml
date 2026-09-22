@@ -1,0 +1,141 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Por omissão o workflow só lê. Os jobs que precisam de escrever pedem-no
+# explicitamente, para o token não andar com mais poder do que o necessário.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  testes:
+    name: Testes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Instalar dependências
+        run: pip install -r requirements-dev.txt
+
+      # Sem .env de propósito: o tests/conftest.py preenche o mínimo que o
+      # Settings exige, e assim este CI nunca precisa de segredos nenhuns.
+      # Verificado antes de commitar: 107 testes passam com o .env escondido.
+      - name: pytest
+        run: pytest -q
+
+  tamanho-da-funcao:
+    name: Tamanho da função na Vercel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Um venv limpo só com o requirements.txt — o que a Vercel instala.
+      # O requirements-dev.txt não conta: nada dele vai para a função.
+      - name: Instalar só as dependências de produção
+        run: |
+          python -m venv /tmp/prod
+          /tmp/prod/bin/pip install --quiet --upgrade pip
+          /tmp/prod/bin/pip install --quiet -r requirements.txt
+
+      - name: Comparar com o limite da Vercel
+        env:
+          # A Vercel corta aos 250 MB descompactados. O alarme dispara antes,
+          # para haver margem para reagir em vez de descobrir no deploy.
+          ALARME_MB: 200
+        run: |
+          SP=/tmp/prod/lib/python3.11/site-packages
+          total=$(du -sb "$SP" | cut -f1)
+          # pip e setuptools não fazem parte do que corre na função.
+          for d in pip setuptools wheel; do
+            if [ -d "$SP/$d" ]; then
+              total=$(( total - $(du -sb "$SP/$d" | cut -f1) ))
+            fi
+          done
+          mb=$(( total / 1048576 ))
+          echo "### Dependências de produção: ${mb} MB" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| | MB |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Medido | ${mb} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Alarme deste CI | ${ALARME_MB} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Limite da Vercel | 250 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Maiores pacotes:" >> "$GITHUB_STEP_SUMMARY"
+          du -sh "$SP"/* 2>/dev/null | sort -rh | head -8 \
+            | sed 's|.*/||; s|^|- |' >> "$GITHUB_STEP_SUMMARY"
+          echo "Dependências de produção: ${mb} MB (alarme: ${ALARME_MB}, limite Vercel: 250)"
+          if [ "$mb" -gt "$ALARME_MB" ]; then
+            echo "::error::As dependências de produção estão em ${mb} MB e passaram o alarme de ${ALARME_MB} MB. O limite da Vercel são 250 MB descompactados — acima disso o deploy falha. Ver o resumo do job para os maiores pacotes."
+            exit 1
+          fi
+
+  aprovar:
+    name: Aprovar automaticamente
+    needs: [testes, tamanho-da-funcao]
+    # Só PRs do próprio repositório. Um PR vindo de um fork nunca é aprovado
+    # sozinho: o código é de terceiros e os testes dele passarem não diz nada
+    # sobre a intenção de quem o escreveu.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      # actions/github-script é da própria GitHub. Há ações de terceiros que
+      # fazem isto em menos linhas, mas dar-lhes um token com permissão de
+      # escrita em PRs é superfície de ataque que não se justifica aqui.
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+
+            // Idempotente: um push novo ao mesmo PR não empilha aprovações.
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner, repo, pull_number: pr.number, per_page: 100,
+            });
+            const jaAprovado = reviews.some(
+              (r) => r.state === 'APPROVED'
+                  && r.user?.login === 'github-actions[bot]'
+                  && r.commit_id === pr.head.sha,
+            );
+            if (jaAprovado) {
+              core.info(`Já existe aprovação automática para ${pr.head.sha}. Nada a fazer.`);
+              return;
+            }
+
+            await github.rest.pulls.createReview({
+              owner, repo, pull_number: pr.number,
+              event: 'APPROVE',
+              body: [
+                'Aprovado automaticamente: as verificações do CI passaram.',
+                '',
+                '**O que isto verifica e o que não verifica.** Os testes cobrem',
+                'a lógica da aplicação. Não vêem permissões da base de dados,',
+                'políticas de RLS, nem segredos mal colocados — nesta mesma',
+                'linha de trabalho os 107 testes passaram enquanto as funções',
+                '`rsvp_*` estavam abertas ao role `anon`. Uma aprovação daqui',
+                'não substitui ler o diff quando ele toca em permissões,',
+                'autenticação ou migrações.',
+              ].join('\n'),
+            });
+            core.info(`PR #${pr.number} aprovado em ${pr.head.sha}.`);
