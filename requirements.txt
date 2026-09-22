@@ -1,17 +1,16 @@
+# Dependências de produção — é isto que a Vercel instala na função.
+# Manter enxuto: o limite de uma serverless function são 250 MB descompactados,
+# e a lista original (com supabase, python-jose, pusher, numpy e uvicorn) dava
+# 255 MB. Ver requirements-dev.txt para o que só é preciso em desenvolvimento.
 fastapi>=0.109.0
-uvicorn[standard]>=0.27.0
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
-python-jose[cryptography]>=3.3.0
+# PyJWT valida os tokens do Supabase (core/security.py) e assina os QR de entrada.
 PyJWT[crypto]>=2.8.0
-supabase>=2.3.0
 openai>=1.10.0
-pusher>=3.3.0
+# O Supabase é acedido por REST (PostgREST) com httpx — sem SDK, sem ORM.
 httpx>=0.26.0
-python-multipart>=0.0.6
-numpy>=1.26.0
 slowapi>=0.1.9
+# Usados pelo guard de onboarding e pela extração de gostos.
 langchain-core>=0.3.0,<0.4
 langchain-openai>=0.2.0,<0.3
-pytest>=7.4.0
-pytest-asyncio>=0.23.0

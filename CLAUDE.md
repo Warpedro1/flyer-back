@@ -23,7 +23,7 @@ Cursor rules in `.cursor/rules/{frontend,backend}.mdc` define the canonical conv
 ### Backend (`FlyerBack/`)
 - `uvicorn app.main:app --reload` — run the API locally (default `http://127.0.0.1:8000`).
 - `pytest` — run tests (`asyncio_mode = auto`, `testpaths = tests`). Single file: `pytest tests/test_onboarding_pipeline.py`. Single test: `pytest tests/test_onboarding_guard.py::test_name`.
-- Dependencies: `pip install -r requirements.txt` inside `.venv`.
+- Dependencies: `pip install -r requirements-dev.txt` inside `.venv`. `requirements.txt` is production-only (what Vercel installs into the function, under a 250 MB limit); the dev file adds `uvicorn` and `pytest`.
 
 Health checks: `GET /` and `GET /health` (the latter echoes the active `CHAT_MODEL`).
 
