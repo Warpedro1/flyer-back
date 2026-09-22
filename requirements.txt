@@ -1,7 +1,7 @@
 # Dependências de produção — é isto que a Vercel instala na função.
 # Manter enxuto: o limite de uma serverless function são 250 MB descompactados,
-# e a lista original (com supabase, python-jose, pusher, numpy e uvicorn) dava
-# 255 MB. Ver requirements-dev.txt para o que só é preciso em desenvolvimento.
+# e a lista original dava 255 MB. Esta dá 123 MB, medidos num venv limpo.
+# Ver requirements-dev.txt para o que só é preciso em desenvolvimento.
 fastapi>=0.109.0
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
@@ -11,6 +11,15 @@ openai>=1.10.0
 # O Supabase é acedido por REST (PostgREST) com httpx — sem SDK, sem ORM.
 httpx>=0.26.0
 slowapi>=0.1.9
+
+# NÃO REMOVER por não estar importado. O tempo real é um requisito do produto
+# ainda não implementado: avisar o telemóvel de quem está na lista de espera
+# quando o criador o chama (ver docs/roadmap/capacity-waitlist-qr.md, "Tempo
+# real"). O README e o CLAUDE.md já o anunciam, e o .env já reserva as
+# PUSHER_*. Um grep sobre app/ não mostra isto — mostra só o presente.
+# Custa ~5 MB de 250.
+pusher>=3.3.0
+
 # Usados pelo guard de onboarding e pela extração de gostos.
 langchain-core>=0.3.0,<0.4
 langchain-openai>=0.2.0,<0.3
