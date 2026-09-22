@@ -99,12 +99,46 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
+    env:
+      # Porque é que isto não usa o GITHUB_TOKEN:
+      #
+      #   "GitHub Actions is not permitted to approve pull requests."  (HTTP 422)
+      #
+      # É uma restrição da plataforma, não uma questão de permissões — testado
+      # neste repositório com `pull-requests: write` concedido, e a API recusa
+      # mesmo assim. Aprovar exige um token de uma IDENTIDADE HUMANA OU DE APP,
+      # e que não seja a autora do PR (a GitHub também não deixa aprovar o
+      # próprio PR).
+      #
+      # Para ligar a aprovação automática, criar um secret APPROVAL_TOKEN com
+      # um PAT de uma segunda conta com acesso de escrita ao repositório, ou um
+      # token de instalação de uma GitHub App. Sem o secret, este job informa e
+      # passa — não fica vermelho de propósito.
+      #
+      # Alternativa que NÃO precisa de token nenhum, e que é o mecanismo certo
+      # se o objetivo é "só entra com os testes verdes": branch protection em
+      # `main` com required status checks. Aí é a plataforma a bloquear o merge,
+      # em vez de um bot a simular um visto.
+      APPROVAL_TOKEN: ${{ secrets.APPROVAL_TOKEN }}
     steps:
+      - name: Há token de aprovação configurado?
+        id: token
+        run: |
+          if [ -z "${APPROVAL_TOKEN}" ]; then
+            echo "presente=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Aprovação automática desligada::As verificações passaram, mas não há secret APPROVAL_TOKEN. O GITHUB_TOKEN não pode aprovar PRs (restrição da GitHub). Ver o comentário no topo deste job."
+          else
+            echo "presente=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # actions/github-script é da própria GitHub. Há ações de terceiros que
       # fazem isto em menos linhas, mas dar-lhes um token com permissão de
       # escrita em PRs é superfície de ataque que não se justifica aqui.
-      - uses: actions/github-script@v7
+      - name: Aprovar
+        if: steps.token.outputs.presente == 'true'
+        uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.APPROVAL_TOKEN }}
           script: |
             const pr = context.payload.pull_request;
             const { owner, repo } = context.repo;
@@ -113,13 +147,23 @@ jobs:
             const reviews = await github.paginate(github.rest.pulls.listReviews, {
               owner, repo, pull_number: pr.number, per_page: 100,
             });
+            const me = await github.rest.users.getAuthenticated();
             const jaAprovado = reviews.some(
               (r) => r.state === 'APPROVED'
-                  && r.user?.login === 'github-actions[bot]'
+                  && r.user?.login === me.data.login
                   && r.commit_id === pr.head.sha,
             );
             if (jaAprovado) {
-              core.info(`Já existe aprovação automática para ${pr.head.sha}. Nada a fazer.`);
+              core.info(`Já existe aprovação para ${pr.head.sha}. Nada a fazer.`);
+              return;
+            }
+
+            if (pr.user.login === me.data.login) {
+              core.warning(
+                `O APPROVAL_TOKEN pertence a ${me.data.login}, que é quem abriu ` +
+                `este PR. A GitHub não deixa aprovar o próprio PR — precisa de ` +
+                `ser um token de outra conta ou de uma GitHub App.`,
+              );
               return;
             }
 
@@ -131,9 +175,10 @@ jobs:
                 '',
                 '**O que isto verifica e o que não verifica.** Os testes cobrem',
                 'a lógica da aplicação. Não vêem permissões da base de dados,',
-                'políticas de RLS, nem segredos mal colocados — nesta mesma',
-                'linha de trabalho os 107 testes passaram enquanto as funções',
-                '`rsvp_*` estavam abertas ao role `anon`. Uma aprovação daqui',
+                'políticas de RLS, nem segredos mal colocados — neste mesmo',
+                'repositório os 107 testes passaram enquanto as funções',
+                '`rsvp_*` estavam abertas ao role `anon`, e qualquer pessoa',
+                'conseguia admitir participantes sem QR. Uma aprovação daqui',
                 'não substitui ler o diff quando ele toca em permissões,',
                 'autenticação ou migrações.',
               ].join('\n'),
