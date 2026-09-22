@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import numpy as np
 from openai import AsyncOpenAI
 
 from app.core.config import settings
@@ -66,6 +65,22 @@ class AIService:
         return content or ""
 
     @staticmethod
+    def _weighted_sum(
+        a: list[float],
+        b: list[float],
+        weight_a: float,
+        weight_b: float,
+    ) -> list[float]:
+        """Element-wise ``a * weight_a + b * weight_b``.
+
+        Plain Python on purpose: this was numpy, which cost 73 MB of the
+        serverless bundle for three weighted sums over 1536 floats. ``strict``
+        keeps numpy's refusal to combine vectors of different lengths — silently
+        truncating to the shorter one would corrupt an embedding unnoticed.
+        """
+        return [x * weight_a + y * weight_b for x, y in zip(a, b, strict=True)]
+
+    @staticmethod
     def blend_vectors(
         personal: list[float],
         social: list[float],
@@ -73,18 +88,17 @@ class AIService:
         w_social: float = 0.2,
     ) -> list[float]:
         """Hybrid query vector for social mode (weights tunable)."""
-        a = np.asarray(personal, dtype=np.float64)
-        b = np.asarray(social, dtype=np.float64)
-        return (a * w_personal + b * w_social).tolist()
+        return AIService._weighted_sum(personal, social, w_personal, w_social)
 
     @staticmethod
     def update_interest_organically(current: list[float], new: list[float]) -> list[float]:
         """V_final = V_current * w_c + V_new * w_n (config-driven)."""
-        wc = settings.INTEREST_WEIGHT_CURRENT
-        wn = settings.INTEREST_WEIGHT_NEW
-        a = np.asarray(current, dtype=np.float64)
-        b = np.asarray(new, dtype=np.float64)
-        return (a * wc + b * wn).tolist()
+        return AIService._weighted_sum(
+            current,
+            new,
+            settings.INTEREST_WEIGHT_CURRENT,
+            settings.INTEREST_WEIGHT_NEW,
+        )
 
     @staticmethod
     def blend_interest_weighted(
@@ -94,9 +108,7 @@ class AIService:
         weight_new: float,
     ) -> list[float]:
         """Generic convex blend (used for anchor vs organic sync)."""
-        a = np.asarray(current, dtype=np.float64)
-        b = np.asarray(new, dtype=np.float64)
-        return (a * weight_current + b * weight_new).tolist()
+        return AIService._weighted_sum(current, new, weight_current, weight_new)
 
     async def moderate_text(self, text: str) -> tuple[bool, list[str]]:
         """Return (is_allowed, flagged_categories_or_reasons)."""

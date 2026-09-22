@@ -417,6 +417,12 @@ begin
 end $$;
 
 -- --------------------------------------------------------------- 11. grants --
+--
+-- ATENÇÃO: os revokes abaixo NÃO bastam. O Supabase concede EXECUTE a anon e
+-- authenticated por ALTER DEFAULT PRIVILEGES quando a função é criada, e isso é
+-- separado do role PUBLIC — estas funções ficaram chamáveis com a chave
+-- publicável. Corrigido em 20260922000000_rsvp_revoke_execute_from_client_roles,
+-- que revoga explicitamente desses dois roles. Ver lá o detalhe.
 
 revoke all on function public.rsvp_taken_count(uuid)                  from public;
 revoke all on function public.rsvp_sweep_expired_calls(uuid)          from public;
