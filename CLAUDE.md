@@ -9,7 +9,7 @@ This is a two-project monorepo for **Flyer**, an event-recommendation and social
 - `Flyer/` — React 18 + TypeScript + Vite frontend (Tailwind CSS v4).
 - `FlyerBack/` — FastAPI (Python 3.11+) backend, talking to Supabase, OpenAI, and Pusher.
 
-Cursor rules in `.cursor/rules/{frontend,backend}.mdc` define the canonical conventions; they are authored in Portuguese and the key constraints are summarized below.
+The conventions below are canonical for both projects.
 
 ## Commands
 
@@ -42,6 +42,7 @@ Key cross-cutting patterns:
 - **Async everywhere.** Use `async`/`await` and explicit return type annotations on all endpoints and service methods.
 - **Pydantic.** Use `ConfigDict(extra="forbid")`. Money/score fields use `decimal.Decimal`; dates use `datetime`.
 - **Rate limiting.** SlowAPI is wired globally in `main.py`; apply `@limiter.limit(...)` decorators to mutation endpoints (POST/PUT).
+- **`SECURITY DEFINER` functions.** Revoke `EXECUTE` explicitly from `public`, `anon` and `authenticated`, then grant it to `service_role`. Supabase grants `anon` and `authenticated` through default privileges, separately from `PUBLIC`, so `REVOKE ... FROM PUBLIC` alone leaves the function callable at `/rest/v1/rpc/<name>` with the publishable key. Also pin `search_path`. Check with the Supabase security advisors after applying.
 - **Onboarding pipeline.** `onboarding_pipeline.py` orchestrates guard → taste extraction → embedding → profile → Chroma upsert. AI/embedding behavior and the Chroma vector store are optional and gated on env config.
 
 ## Frontend architecture (`Flyer/src/`)
@@ -52,11 +53,11 @@ Key cross-cutting patterns:
 - **Types.** `types/index.ts` must mirror the backend Pydantic schemas exactly. Decimal fields (money, ratings) are typed as `string | null` on the UI side.
 - **Styling.** Tailwind CSS v4 only (via `@tailwindcss/vite`). Do not add Bootstrap, MUI, or any prebuilt component library. Accent color is `red-600`; prefer `rounded-2xl`/`rounded-3xl`. Root container is `h-screen overflow-hidden`; only `<main>` scrolls (`overflow-y-auto`).
 
-### Frontend conventions (from `.cursor/rules/frontend.mdc`)
+### Frontend conventions
 - **TDD:** write/update the `*.test.tsx` (or `*.test.ts`) file before changing a component or hook.
 - Tests use Vitest + `@testing-library/react` + `userEvent`. Test behavior, not internal state. **Never make real API calls** — intercept with MSW (`src/mocks/handlers.ts`, `src/mocks/server.ts`).
 - TypeScript strict mode; `any` is forbidden. Functional components only, `PascalCase` filenames. Always write `useEffect` cleanup functions for listeners/timeouts/subscriptions.
 
 ## Environment
 
-Both projects require their own `.env` (copy from each `.env.example`). The frontend needs at least `VITE_API_BASE_URL` (`apiClient.ts` throws on startup if missing) plus Supabase keys. The backend needs `SUPABASE_URL`, `SUPABASE_KEY`, `SUPABASE_JWT_SECRET`, and optionally `OPENAI_API_KEY`/`OPENAI_KEY`, Pusher (`PUSHER_*`), `CHAT_MODEL`, and `EMBEDDING_MODEL`. SQL migrations live in `FlyerBack/migrations/`.
+Both projects require their own `.env` (copy from each `.env.example`). The frontend needs at least `VITE_API_BASE_URL` (`apiClient.ts` throws on startup if missing) plus Supabase keys. The backend needs `SUPABASE_URL`, `SUPABASE_KEY` (a `sb_secret_...` key, or the legacy `service_role` JWT until Supabase retires it at the end of 2026), `SUPABASE_JWT_SECRET`, and optionally `OPENAI_API_KEY`/`OPENAI_KEY`, Pusher (`PUSHER_*`), `CHAT_MODEL`, and `EMBEDDING_MODEL`. SQL migrations live in `FlyerBack/supabase/migrations/` (timestamped, applied in order); `FlyerBack/migrations/003_create_plans.sql` is legacy.
