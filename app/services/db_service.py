@@ -97,11 +97,12 @@ class DBService:
 
     def _admin_headers(self) -> dict[str, str]:
         token = settings.SUPABASE_KEY
-        return {
-            **_json_headers(),
-            "apikey": token,
-            "Authorization": f"Bearer {token}",
-        }
+        headers = {**_json_headers(), "apikey": token}
+        # Secret keys (sb_secret_...) are not JWTs: Supabase rejects them in
+        # Authorization with "Invalid JWT", so only the legacy JWT key goes there.
+        if not token.startswith("sb_"):
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
 
     @staticmethod
     def _extract_pg_code(response: httpx.Response) -> str | None:
