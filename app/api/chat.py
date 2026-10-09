@@ -1,7 +1,6 @@
 """AI chat endpoints."""
 
 import asyncio
-import json
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -10,7 +9,6 @@ from app.api.deps import DbServiceDep, get_current_user_with_token
 from app.core.config import settings
 from app.core.limiter import limiter
 from app.models.schemas import (
-    EMBEDDING_DIMENSIONS,
     ChatMessageIn,
     ChatMessageOut,
     ChatSender,
@@ -19,6 +17,7 @@ from app.models.schemas import (
     ValidateOnboardingOut,
 )
 from app.services.ai_service import ai_service
+from app.services.interest_sync import SyncOutcome, apply_chat_sync
 from app.services.onboarding_guard import run_light_chat_content_guard
 from app.services.onboarding_pipeline import (
     run_complete_onboarding_pipeline,
@@ -37,33 +36,16 @@ Responda de forma breve, útil e amigável."""
 
 
 def _build_embedding_corpus(messages: list[dict[str, Any]]) -> str:
-    """Structured dialogue for sync; emphasises user-authored lines for interest embedding."""
-    dialogue_lines: list[str] = []
-    user_lines: list[str] = []
-    for m in messages:
-        sender = str(m.get("sender", ""))
-        content = str(m.get("content", ""))
-        line = f"{sender.capitalize()}: {content}"
-        dialogue_lines.append(line)
-        if sender == ChatSender.user.value:
-            user_lines.append(f"User: {content}")
-    dialog = "\n".join(dialogue_lines)
-    user_block = "\n".join(user_lines)
-    if user_block:
-        return f"{user_block}\n\n---\n{dialog}"
-    return dialog
+    """Only what the user wrote: the interest vector is about the user's taste.
 
-
-def _parse_interest_embedding(raw: Any) -> list[float] | None:
-    if raw is None:
-        return None
-    if isinstance(raw, list):
-        return [float(x) for x in raw]
-    if isinstance(raw, str):
-        text = raw.strip()
-        if text.startswith("["):
-            return [float(x) for x in json.loads(text)]
-    return None
+    The assistant's replies used to be included too, which pulled the vector
+    towards the model's own vocabulary (#4).
+    """
+    return "\n".join(
+        f"User: {m.get('content', '')}"
+        for m in messages
+        if str(m.get("sender", "")) == ChatSender.user.value
+    )
 
 
 def _wrap_preferences_block(text: str) -> str:
@@ -161,36 +143,21 @@ async def post_chat_sync(
     user_id, jwt = auth
     chat_id = await db.get_or_create_chat(user_id, jwt)
     recent = await db.get_recent_messages(chat_id, jwt, limit=20)
-    if not recent:
+    corpus = _build_embedding_corpus(recent)
+    if not corpus:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No messages to sync.",
         )
-    corpus = _build_embedding_corpus(recent)
     new_vec = await ai_service.generate_embedding(corpus)
-    profile = await db.get_profile(user_id, jwt)
-    if not profile:
+    outcome = await apply_chat_sync(db, user_id, jwt, new_vec)
+    if outcome is SyncOutcome.no_profile:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found.")
-    sync_count = int(profile.get("interest_sync_count_after_onboarding") or 0)
-    current = _parse_interest_embedding(profile.get("interest_embedding"))
-    if (
-        current is not None
-        and len(current) == len(new_vec)
-        and len(new_vec) == EMBEDDING_DIMENSIONS
-    ):
-        if sync_count < settings.SYNC_ANCHOR_COUNT:
-            final_vec = ai_service.blend_interest_weighted(
-                current,
-                new_vec,
-                settings.INTEREST_ANCHOR_WEIGHT_CURRENT,
-                settings.INTEREST_ANCHOR_WEIGHT_NEW,
-            )
-        else:
-            final_vec = ai_service.update_interest_organically(current, new_vec)
-    else:
-        final_vec = new_vec
-    await db.update_profile_embedding(user_id, final_vec)
-    await db.increment_interest_sync_count(user_id, jwt)
+    if outcome is SyncOutcome.conflict:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Outra sincronização está em curso. Tenta outra vez.",
+        )
     return {"status": "success", "message": "Profile interests updated"}
 
 

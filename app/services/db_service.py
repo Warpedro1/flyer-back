@@ -241,53 +241,6 @@ class DBService:
         msg = "Could not create profile row"
         raise RuntimeError(msg)
 
-    async def increment_interest_sync_count(self, user_id: str, jwt: str) -> int:
-        """Atomically increment via RPC when migration is applied; otherwise R-M-W fallback."""
-        r = await self._client.post(
-            f"{REST_PREFIX}/rpc/increment_interest_sync_count",
-            json={"p_user_id": user_id},
-            headers=self._admin_headers(),
-        )
-        if r.status_code == 404:
-            return await self._increment_interest_sync_count_fallback(user_id, jwt)
-        await self._raise_for_supabase(r)
-        val = r.json()
-        if isinstance(val, int):
-            return val
-        if isinstance(val, str) and val.lstrip("-").isdigit():
-            return int(val)
-        return -1
-
-    async def _increment_interest_sync_count_fallback(self, user_id: str, jwt: str) -> int:
-        """Compare-and-swap increment when the RPC is unavailable.
-
-        PostgREST cannot express ``col = col + 1``, so we read the value and PATCH
-        only the row whose count is still ``cur`` (filtered update), retrying when a
-        concurrent writer wins the race. This avoids the lost-update bug of a plain
-        read-modify-write under concurrent syncs.
-        """
-        for _ in range(5):
-            prof = await self.get_profile(user_id, jwt)
-            if prof is None:
-                return -1
-            cur = int(prof.get("interest_sync_count_after_onboarding") or 0)
-            nxt = cur + 1
-            r = await self._client.patch(
-                f"{REST_PREFIX}/profiles",
-                params={
-                    "id": f"eq.{user_id}",
-                    "interest_sync_count_after_onboarding": f"eq.{cur}",
-                },
-                json={"interest_sync_count_after_onboarding": nxt},
-                headers={**self._user_headers(jwt), "Prefer": "return=representation"},
-            )
-            await self._raise_for_supabase(r)
-            updated = r.json()
-            if isinstance(updated, list) and updated:
-                return nxt
-            # Another writer advanced the counter between read and write; retry.
-        return -1
-
     async def update_profile(
         self,
         user_id: str,
@@ -311,6 +264,32 @@ class DBService:
         )
         await self._raise_for_supabase(r)
 
+    async def update_interest_vector_if_count(
+        self,
+        user_id: str,
+        vector: list[float],
+        expected_count: int | None,
+    ) -> bool:
+        """Store a synced interest vector and bump the sync counter in one write.
+
+        Guarded by the counter the caller read (compare-and-swap): returns False when
+        another sync changed it first, so the caller can re-read and blend again.
+        Writing both together means the counter can no longer lag behind the vector.
+        """
+        count_filter = "is.null" if expected_count is None else f"eq.{expected_count}"
+        r = await self._client.patch(
+            f"{REST_PREFIX}/profiles",
+            params={"id": f"eq.{user_id}", "interest_sync_count_after_onboarding": count_filter},
+            json={
+                "interest_embedding": vector,
+                "interest_sync_count_after_onboarding": (expected_count or 0) + 1,
+            },
+            headers={**self._admin_headers(), "Prefer": "return=representation"},
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        return isinstance(rows, list) and bool(rows)
+
     async def get_social_avg_embedding(self, user_id: str) -> list[float] | None:
         """RPC: average interest_embedding for accepted follows (server-side)."""
         r = await self._client.post(
@@ -323,11 +302,16 @@ class DBService:
 
     async def call_match_events(
         self,
-        query_embedding: list[float],
+        query_embedding: list[float] | None,
         user_lat: float,
         user_lng: float,
         radius_km: float,
     ) -> list[dict[str, Any]]:
+        """Event ids within the radius, best match first (max 200, no past events).
+
+        ``query_embedding=None`` is the fallback for users without an interest
+        vector: the same nearby events, soonest first. See the match_events migration.
+        """
         r = await self._client.post(
             f"{REST_PREFIX}/rpc/match_events",
             json={
@@ -856,7 +840,7 @@ class DBService:
         r = await self._client.patch(
             f"{REST_PREFIX}/events",
             params={"id": f"in.({joined})"},
-            json={"embedding": vector},
+            json={"event_embedding": vector},
             headers=self._admin_headers(),
         )
         await self._raise_for_supabase(r)
