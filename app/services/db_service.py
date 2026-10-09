@@ -87,11 +87,16 @@ class DBService:
         self._client = client
 
     def _user_headers(self, jwt: str) -> dict[str, str]:  # noqa: ARG002
-        """Build PostgREST headers using the service_role key.
+        """Build PostgREST headers for a user-scoped call. Uses the service_role key.
 
-        The backend already validates the user JWT (ES256 via JWKS) before
-        any DB call, so we use the service_role key here to bypass RLS.
-        The ``jwt`` parameter is kept in the signature for API stability.
+        The user's JWT is NOT forwarded: every call runs as service_role and RLS
+        does not apply (issue #7, option B). Authorization lives in the backend:
+        the caller must filter by the ``user_id`` from the validated token, or go
+        through ``app/api/authz.py``. Nothing below the route will stop a query
+        that forgets to.
+
+        ``jwt`` stays in the signature so call sites keep marking which queries are
+        user-scoped, and so forwarding it later is a change in one place.
         """
         return self._admin_headers()
 
