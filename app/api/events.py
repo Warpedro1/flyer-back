@@ -1,12 +1,11 @@
 """Event discovery endpoints."""
 
-import json
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from app.api.authz import require_media_paths_owned
 from app.api.deps import DbServiceDep, get_current_user_with_token
@@ -22,23 +21,15 @@ from app.models.schemas import (
 )
 from app.services.ai_service import ai_service
 from app.services.event_recurrence import expand_recurrence
+from app.services.interest_sync import parse_interest_embedding
 from app.services.onboarding_pipeline import ensure_interest_embedding
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/events", tags=["events"])
 
-
-def _parse_interest_embedding(raw: Any) -> list[float] | None:
-    if raw is None:
-        return None
-    if isinstance(raw, list):
-        return [float(x) for x in raw]
-    if isinstance(raw, str):
-        text = raw.strip()
-        if text.startswith("["):
-            return [float(x) for x in json.loads(text)]
-    return None
+# Read by the frontend; listed in the CORS expose_headers in main.py.
+DISCOVERY_MODE_HEADER = "X-Discovery-Mode"
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -113,35 +104,38 @@ def _row_to_event_read(
 @limiter.limit("20/minute")
 async def discover_events(
     request: Request,
+    response: Response,
     body: DiscoverRequest,
     db: DbServiceDep,
     auth: Annotated[tuple[str, str], Depends(get_current_user_with_token)],
 ) -> list[EventRead]:
+    """Events near the user, best match first.
+
+    Users without an interest vector (no onboarding yet) get the same nearby events
+    ordered by date instead of an error. ``X-Discovery-Mode`` tells the app which
+    one it got (``personalized`` or ``nearby``) so it can suggest the onboarding.
+    """
     user_id, jwt = auth
     profile = await db.get_profile(user_id, jwt)
     if not profile:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found.")
-    personal = _parse_interest_embedding(profile.get("interest_embedding"))
+    personal = parse_interest_embedding(profile.get("interest_embedding"))
     if personal is None or len(personal) != EMBEDDING_DIMENSIONS:
         # Lazy backfill: rebuild the vector from stored onboarding preferences when we can,
         # so users who onboarded before the pipeline (or hit a transient embedding error)
-        # aren't permanently stuck on the 400 below.
+        # get personalised results instead of the nearby fallback below.
         personal = await ensure_interest_embedding(db, user_id, jwt, profile)
+    query_embedding: list[float] | None
     if personal is None or len(personal) != EMBEDDING_DIMENSIONS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Profile has no interest vector yet. Chat first.",
-        )
-
-    social_on = bool(profile.get("social_mode_enabled", False))
-    if social_on:
-        social_vec = await db.get_social_avg_embedding(user_id)
-        if social_vec is not None and len(social_vec) == EMBEDDING_DIMENSIONS:
-            query_embedding = ai_service.blend_vectors(personal, social_vec)
-        else:
-            query_embedding = personal
+        query_embedding = None
+        response.headers[DISCOVERY_MODE_HEADER] = "nearby"
     else:
+        response.headers[DISCOVERY_MODE_HEADER] = "personalized"
         query_embedding = personal
+        if profile.get("social_mode_enabled", False):
+            social_vec = await db.get_social_avg_embedding(user_id)
+            if social_vec is not None and len(social_vec) == EMBEDDING_DIMENSIONS:
+                query_embedding = ai_service.blend_vectors(personal, social_vec)
 
     matches = await db.call_match_events(
         query_embedding,
@@ -203,7 +197,9 @@ async def _embed_events_best_effort(
         if vec:
             await db.set_events_embedding(event_ids, vec)
     except Exception:
-        logger.warning("Event embedding failed (ids=%s)", event_ids, exc_info=True)
+        # Error, not warning: the event is created but personalised discovery ranks
+        # it last until it gets a vector. This used to fail silently for every event.
+        logger.exception("Event embedding failed (ids=%s)", event_ids)
 
 
 @router.post("/", response_model=EventRead, status_code=status.HTTP_201_CREATED)

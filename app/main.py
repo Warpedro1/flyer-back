@@ -42,6 +42,8 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Custom response headers are invisible to a cross-origin fetch unless listed.
+    expose_headers=[events.DISCOVERY_MODE_HEADER],
 )
 
 app.include_router(chat.router)
