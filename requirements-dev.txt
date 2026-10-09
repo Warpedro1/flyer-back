@@ -7,3 +7,7 @@ uvicorn[standard]>=0.27.0
 
 pytest>=7.4.0
 pytest-asyncio>=0.23.0
+
+# Testes de integração (tests/integration) contra Postgres + pgvector reais.
+# Só correm com TEST_DATABASE_URL definido; o CI arranca um servidor para isso.
+psycopg[binary]>=3.2
