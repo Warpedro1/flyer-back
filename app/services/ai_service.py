@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from openai import AsyncOpenAI
 
 from app.core.config import settings
@@ -71,14 +73,22 @@ class AIService:
         weight_a: float,
         weight_b: float,
     ) -> list[float]:
-        """Element-wise ``a * weight_a + b * weight_b``.
+        """Element-wise ``a * weight_a + b * weight_b``, rescaled to unit length.
 
         Plain Python on purpose: this was numpy, which cost 73 MB of the
         serverless bundle for three weighted sums over 1536 floats. ``strict``
         keeps numpy's refusal to combine vectors of different lengths — silently
         truncating to the shorter one would corrupt an embedding unnoticed.
+
+        The rescale matters because embeddings are unit vectors and a weighted sum
+        of two different ones is shorter: without it the stored interest vector
+        shrank on every sync. A zero result is returned as is (nothing to scale).
         """
-        return [x * weight_a + y * weight_b for x, y in zip(a, b, strict=True)]
+        out = [x * weight_a + y * weight_b for x, y in zip(a, b, strict=True)]
+        norm = math.sqrt(sum(x * x for x in out))
+        if norm == 0.0:
+            return out
+        return [x / norm for x in out]
 
     @staticmethod
     def blend_vectors(
