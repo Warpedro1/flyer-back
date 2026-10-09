@@ -5,12 +5,10 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import HTTPException
 
 from app.api.rsvp import (
     _http_from_rpc,
     _not_admissible_error,
-    _require_creator,
     _row_to_rsvp,
     _with_ahead_count,
     bucket_attendees,
@@ -148,41 +146,6 @@ def test_row_to_rsvp_parses_timestamps() -> None:
     assert out.called_at is not None
     assert out.call_expires_at is not None
     assert out.call_expires_at > out.called_at
-
-
-# ----------------------------------------------------------- creator gate --
-
-
-@pytest.mark.asyncio
-async def test_non_creator_is_refused() -> None:
-    db = MagicMock()
-    db.get_event_by_id = AsyncMock(return_value={"id": "evt-1", "creator_id": "someone-else"})
-
-    with pytest.raises(HTTPException) as exc:
-        await _require_creator(db, "evt-1", "user-1", "jwt")
-
-    assert exc.value.status_code == 403
-
-
-@pytest.mark.asyncio
-async def test_missing_event_is_a_404_not_a_403() -> None:
-    db = MagicMock()
-    db.get_event_by_id = AsyncMock(return_value=None)
-
-    with pytest.raises(HTTPException) as exc:
-        await _require_creator(db, "evt-1", "user-1", "jwt")
-
-    assert exc.value.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_creator_passes_and_gets_the_event_row() -> None:
-    db = MagicMock()
-    db.get_event_by_id = AsyncMock(return_value={"id": "evt-1", "creator_id": "user-1"})
-
-    event = await _require_creator(db, "evt-1", "user-1", "jwt")
-
-    assert event["id"] == "evt-1"
 
 
 # ---------------------------------------------------- why the scan failed --

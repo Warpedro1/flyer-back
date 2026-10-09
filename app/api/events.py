@@ -8,6 +8,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from app.api.authz import require_media_paths_owned
 from app.api.deps import DbServiceDep, get_current_user_with_token
 from app.core.limiter import limiter
 from app.models.schemas import (
@@ -214,6 +215,8 @@ async def create_event(
     auth: Annotated[tuple[str, str], Depends(get_current_user_with_token)],
 ) -> EventRead:
     user_id, jwt = auth
+    # Checked before any write: a rejected path must not leave half an event behind.
+    require_media_paths_owned(user_id, (m.media_url for m in body.media))
     base_payload: dict[str, Any] = {
         "title": body.title,
         "description": body.description,
