@@ -38,7 +38,11 @@ Strict layering — keep route handlers thin:
 Key cross-cutting patterns:
 - **No ORM.** Supabase is accessed exclusively via the PostgREST REST API using `httpx`. A single shared `httpx.AsyncClient` is created in the FastAPI `lifespan` (`main.py`) and injected via `HttpClientDep` / `DbServiceDep` (`api/deps.py`) — never create per-request clients.
 - **Auth.** `decode_access_token` (`core/security.py`) validates Supabase JWTs: ES256/RS256/EdDSA via JWKS first, falling back to HS256 with `SUPABASE_JWT_SECRET`. Routes get the user via the `get_current_user` / `get_current_user_with_token` dependencies.
-- **RLS pass-through vs. admin.** For user-scoped data, forward the user's JWT to Supabase so Row Level Security applies. For global/system operations (e.g. listing plans), use the `service_role` admin header. Never expose the service-role key to clients.
+- **Authorization lives in the backend, not in RLS** (issue #7, option B). Every PostgREST call runs with the `service_role` key — `DBService._user_headers` does not forward the user's JWT — so Row Level Security never applies on the API path. The RLS policies in the schema only protect direct client access with the publishable key (e.g. Storage uploads); do not count on them behind the API. Consequences:
+  - Any read or write of user-scoped data must filter by the `user_id` from the validated token, or go through `app/api/authz.py` (`require_owner`, `require_event_creator`, `require_media_paths_owned`). Add new ownership rules there rather than re-implementing them per route.
+  - Every route must depend on `get_current_user` / `get_current_user_with_token`. `tests/test_route_auth.py` walks the route table and fails otherwise; the only exceptions are the public list (`/`, `/health`, `*/health`, `GET /plans/`) and `/admin/*`, which uses `X-Admin-Token`.
+  - `profiles.is_private` today only decides whether a follow starts as `pending`. The RLS also hides private users' events, trophies and profile data from non-followers, but the backend deliberately does not apply that (no UI sets `is_private` yet); revisit when privacy settings ship.
+  - Never expose the service-role key to clients.
 - **Async everywhere.** Use `async`/`await` and explicit return type annotations on all endpoints and service methods.
 - **Pydantic.** Use `ConfigDict(extra="forbid")`. Money/score fields use `decimal.Decimal`; dates use `datetime`.
 - **Rate limiting.** SlowAPI is wired globally in `main.py`; apply `@limiter.limit(...)` decorators to mutation endpoints (POST/PUT).

@@ -11,6 +11,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
+from app.api.authz import require_event_creator
 from app.api.deps import DbServiceDep, get_current_user_with_token
 from app.core.limiter import limiter
 from app.models.schemas import (
@@ -137,21 +138,6 @@ def bucket_attendees(
     )
 
 
-async def _require_creator(db: DbServiceDep, event_id: str, user_id: str, jwt: str) -> dict[str, Any]:
-    """Load the event and reject anyone who is not its creator."""
-    event = await db.get_event_by_id(event_id, jwt)
-    if not event:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Evento não encontrado."
-        )
-    if str(event.get("creator_id") or "") != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Só o criador do evento pode fazer isto.",
-        )
-    return event
-
-
 async def _with_ahead_count(
     db: DbServiceDep, row: dict[str, Any], jwt: str
 ) -> RsvpRead:
@@ -268,7 +254,7 @@ async def list_attendees(
 ) -> AttendeeListRead:
     """Full queue for the creator. Polling this is what drives the lazy sweep."""
     user_id, jwt = auth
-    event = await _require_creator(db, event_id, user_id, jwt)
+    event = await require_event_creator(db, event_id, user_id, jwt)
     await db.sweep_expired_calls(event_id)
 
     rows = await db.get_event_rsvps(event_id, jwt)
@@ -332,7 +318,7 @@ async def scan_ticket(
     slip through between the check and the write.
     """
     user_id, jwt = auth
-    await _require_creator(db, event_id, user_id, jwt)
+    await require_event_creator(db, event_id, user_id, jwt)
     claims = verify_token(body.token, event_id)
     await db.sweep_expired_calls(event_id)
 
