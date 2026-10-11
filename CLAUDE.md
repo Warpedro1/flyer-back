@@ -45,7 +45,7 @@ Key cross-cutting patterns:
   - Never expose the service-role key to clients.
 - **Async everywhere.** Use `async`/`await` and explicit return type annotations on all endpoints and service methods.
 - **Pydantic.** Use `ConfigDict(extra="forbid")`. Money/score fields use `decimal.Decimal`; dates use `datetime`.
-- **Rate limiting.** SlowAPI is wired globally in `main.py`; apply `@limiter.limit(...)` decorators to mutation endpoints (POST/PUT).
+- **Rate limiting.** SlowAPI is wired globally in `main.py`; apply `@limiter.limit(...)` decorators to mutation endpoints (POST/PUT). Counters live in the shared store from `RATE_LIMIT_STORAGE_URI` (Upstash Redis; `REDIS_URL`/`KV_URL` also read) so limits hold across serverless instances; without it they fall back to per-instance memory. Requests with a valid token are counted per user, others per client IP (`x-forwarded-for`, which Vercel overwrites) — see `core/limiter.py`.
 - **`SECURITY DEFINER` functions.** Revoke `EXECUTE` explicitly from `public`, `anon` and `authenticated`, then grant it to `service_role`. Supabase grants `anon` and `authenticated` through default privileges, separately from `PUBLIC`, so `REVOKE ... FROM PUBLIC` alone leaves the function callable at `/rest/v1/rpc/<name>` with the publishable key. Also pin `search_path`. Check with the Supabase security advisors after applying.
 - **Onboarding pipeline.** `onboarding_pipeline.py` orchestrates guard → taste extraction → embedding → profile → Chroma upsert. AI/embedding behavior and the Chroma vector store are optional and gated on env config.
 

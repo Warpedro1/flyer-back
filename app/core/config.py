@@ -4,7 +4,7 @@ import os
 from functools import lru_cache
 from typing import Self
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     # Short enough that a photo of someone else's screen is useless by the door.
     RSVP_QR_TTL_SECONDS: int = Field(default=45, ge=15, le=300)
     RSVP_CALL_TTL_MINUTES_DEFAULT: int = Field(default=10, ge=1, le=240)
+
+    # Rate limiting (#8). Shared counter store for SlowAPI; empty = per-instance memory,
+    # which on serverless means each instance counts on its own. Upstash via the Vercel
+    # Marketplace injects REDIS_URL / KV_URL, so those names are read too.
+    RATE_LIMIT_STORAGE_URI: str = Field(
+        default="",
+        validation_alias=AliasChoices("RATE_LIMIT_STORAGE_URI", "REDIS_URL", "KV_URL"),
+    )
 
     # Event media storage (private Supabase bucket; backend signs read URLs)
     MEDIA_BUCKET: str = "event-media"
