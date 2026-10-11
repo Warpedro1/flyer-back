@@ -11,6 +11,8 @@ openai>=1.10.0
 # O Supabase é acedido por REST (PostgREST) com httpx — sem SDK, sem ORM.
 httpx>=0.26.0
 slowapi>=0.1.9
+# Store partilhado dos contadores do rate limiting (Upstash), ver RATE_LIMIT_STORAGE_URI.
+redis>=5.0
 
 # NÃO REMOVER por não estar importado. O tempo real é um requisito do produto
 # ainda não implementado: avisar o telemóvel de quem está na lista de espera
