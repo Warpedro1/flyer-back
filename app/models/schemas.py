@@ -4,11 +4,43 @@ import re
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 EMBEDDING_DIMENSIONS = 1536
+
+# Taxonomy of things to do (decision 2026-10-11). Slugs are stored in `events.category`
+# and mirrored by the app (`src/utils/categories.ts`); renaming one needs a data
+# migration. Labels live in the app.
+EventCategory = Literal[
+    "comida_bebida",
+    "vida_noturna",
+    "musica_show",
+    "arte_cultura",
+    "teatro_cinema",
+    "palestra_conhecimento",
+    "cursos_oficinas",
+    "estudo_leitura",
+    "debate_comunidade",
+    "voluntariado",
+    "desporto",
+    "academia_exercicio",
+    "bem_estar",
+    "praia_natureza",
+    "turismo_passeio",
+    "jogos",
+    "compras_lojas",
+    "feira_mercado",
+    "familia_criancas",
+    "religiao_espiritualidade",
+    "tecnologia_negocios",
+    "outros",
+]
+EVENT_CATEGORIES: tuple[str, ...] = get_args(EventCategory)
+
+# `event` has a date (or was created in the app); `place` is somewhere permanent to go.
+EventKind = Literal["event", "place"]
 
 
 class ChatSender(str, Enum):
@@ -83,12 +115,24 @@ class EventMediaRead(BaseModel):
     order_index: int = 0
 
 
+class OpeningHours(BaseModel):
+    """One line of a place's opening hours, as the source gives it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    day: str = Field(max_length=40)
+    hours: str = Field(max_length=120)
+
+
 class EventRead(BaseModel):
     """Event row aligned with DDL `events`, plus nested media."""
 
     model_config = ConfigDict(extra="forbid")
 
     id: str
+    kind: EventKind = "event"
+    # Where the event happens, when it is at a known place (kind = place).
+    place_id: str | None = None
     creator_id: str | None = None
     title: str
     description: str | None = None
@@ -108,10 +152,21 @@ class EventRead(BaseModel):
     boost_expires_at: datetime | None = None
     created_at: datetime | None = None
     media: list[EventMediaRead] = Field(default_factory=list)
+    # Places only: opening hours and price level from 1 ($) to 4 ($$$$).
+    opening_hours: list[OpeningHours] | None = None
+    price_level: int | None = Field(default=None, ge=1, le=4)
+    # Ingested items: the page at the source and its public cover image.
+    source_url: str | None = None
+    cover_url: str | None = None
 
 
 class DiscoverRequest(BaseModel):
-    """Input contract for hybrid/geolocation event discovery."""
+    """Input contract for hybrid/geolocation event discovery.
+
+    Filters are optional. Places have no date nor exact price, so they always pass
+    the date and price filters; events with an unknown price do not pass a price
+    filter (see the `places_catalog` migration).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -120,6 +175,18 @@ class DiscoverRequest(BaseModel):
     radius_km: float = Field(default=10.0, gt=0, le=100)
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1, le=50)
+    kinds: list[EventKind] | None = Field(default=None, min_length=1, max_length=2)
+    categories: list[EventCategory] | None = Field(default=None, min_length=1, max_length=22)
+    date_from: datetime | None = None
+    date_to: datetime | None = None
+    # 0 = free only.
+    max_price: Decimal | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _dates_in_order(self) -> "DiscoverRequest":
+        if self.date_from and self.date_to and self.date_from > self.date_to:
+            raise ValueError("date_from must not be after date_to.")
+        return self
 
 
 class ChatMessageIn(BaseModel):
@@ -349,12 +416,14 @@ class EventCreate(BaseModel):
 
     title: str = Field(min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=2000)
-    category: str | None = Field(default=None, max_length=100)
+    category: EventCategory | None = None
     location_name: str | None = Field(default=None, max_length=200)
     lat: float = Field(ge=-90.0, le=90.0)
     long: float = Field(ge=-180.0, le=180.0)
     event_date: datetime | None = None
     price: Decimal | None = Field(default=None, ge=0)
+    # The place (kind = place) where this event happens, chosen by the creator.
+    place_id: str | None = Field(default=None, min_length=1, max_length=64)
     media: list[EventMediaCreate] = Field(default_factory=list, max_length=10)
     recurrence: EventRecurrence | None = None
     # None = no limit: everybody joins as `confirmed` and the waitlist is never used.

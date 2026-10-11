@@ -1,95 +1,243 @@
-"""LLM transform: normalize noisy provider payloads into validated Flyer events.
+"""Transform: raw Google Maps places and Sympla events into `StandardizedEvent`.
 
-The `source_event_id` is authoritative on the Python side (derived from the raw item),
-so a hallucinated id from the model is dropped rather than inserted.
+Deterministic, no LLM. Coordinates come from the source; an item without them is
+dropped instead of guessed (the old LLM transform estimated lat/long from addresses).
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
+import html
 import logging
+import re
+import unicodedata
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
-from app.core.config import settings
-from app.services.ai_service import ai_service
+from pydantic import ValidationError
+
+from app.models.schemas import EventCategory
 from app.services.etl.schemas import RawEvent, StandardizedEvent
+from app.services.etl.taxonomy import GOOGLE_KEYWORDS, PILOT_SEARCHES, SYMPLA_KEYWORDS
 
 logger = logging.getLogger(__name__)
 
-FLYER_CATEGORIES = ["music", "sport", "food", "art", "nightlife", "outdoor", "other"]
-
-_SYSTEM_PROMPT = (
-    "Você padroniza eventos para o app Flyer. Recebe um JSON {\"events\": [...]} com "
-    "eventos brutos e devolve um JSON {\"events\": [...]} com os campos: "
-    "source_event_id (copie exatamente o recebido), title, description (tom jovem e "
-    "convidativo, em pt-BR, até 2000 chars), category (um de: "
-    f"{', '.join(FLYER_CATEGORIES)}), location_name, lat (float), long (float), "
-    "event_date (ISO 8601 ou null), price (número em string ou null). "
-    "Não invente eventos nem ids; se faltar lat/long, use a melhor estimativa a partir "
-    "do endereço. Responda APENAS com o objeto JSON."
-)
-
-_COMPACT_KEYS = (
-    "title", "name", "description", "category", "type", "location", "venue", "address",
-    "latitude", "longitude", "lat", "lng", "long", "startDate", "start_date",
-    "date", "when", "time", "event_date", "price", "link",
-)
+MAX_DESCRIPTION = 2000
 
 
-def _stable_source_event_id(item: RawEvent) -> str:
-    for key in ("id", "eventId", "event_id", "url", "link"):
-        value = item.get(key)
-        if isinstance(value, (str, int)) and str(value).strip():
-            return str(value)[:200]
-    basis = json.dumps(item, sort_keys=True, default=str)
-    return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:32]  # noqa: S324 (non-crypto id)
+# ----------------------------------------------------------------- helpers --
 
 
-def _compact(item: RawEvent) -> dict[str, Any]:
-    return {k: item[k] for k in _COMPACT_KEYS if k in item}
+def normalize(text: str | None) -> str:
+    """Lowercase, no accents, single spaces: for matching, never for display."""
+    if not text:
+        return ""
+    plain = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    return " ".join(plain.lower().split())
 
 
-async def standardize_events(
-    raw: list[RawEvent],
-    source: str,
-    model: str | None = None,
-) -> list[StandardizedEvent]:
-    """Normalize raw events via the LLM; return only rows that validate against the schema."""
-    if not raw:
-        return []
-    model = model or settings.ETL_TRANSFORM_MODEL
+def _first_keyword(text: str, table: tuple[tuple[str, EventCategory], ...]) -> EventCategory | None:
+    for keyword, category in table:
+        if re.search(rf"\b{re.escape(keyword)}s?\b", text):
+            return category
+    return None
 
-    by_id: dict[str, dict[str, Any]] = {}
-    for item in raw:
-        sid = _stable_source_event_id(item)
-        by_id[sid] = {"source_event_id": sid, **_compact(item)}
 
-    user_content = json.dumps({"events": list(by_id.values())}, ensure_ascii=False, default=str)
+def clean_description(text: str | None) -> str | None:
+    """Unescape HTML entities, keep paragraphs, collapse blank runs, fit 2000 chars."""
+    if not text:
+        return None
+    plain = html.unescape(text).replace("\xa0", " ").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [" ".join(line.split()) for line in plain.split("\n")]
+    joined = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+    if not joined:
+        return None
+    if len(joined) > MAX_DESCRIPTION:
+        joined = joined[: MAX_DESCRIPTION - 1].rstrip() + "…"
+    return joined
+
+
+def _text(value: Any, limit: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = " ".join(value.split())
+    return value[:limit] or None
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _str(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _float(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
     try:
-        raw_out = await ai_service.json_completion(_SYSTEM_PROMPT, user_content, model)
-        parsed = json.loads(raw_out)
-    except Exception:
-        logger.warning("ETL transform: LLM call or JSON parse failed", exc_info=True)
-        return []
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
-    items = parsed.get("events") if isinstance(parsed, dict) else None
-    if not isinstance(items, list):
-        return []
 
-    allowed = set(StandardizedEvent.model_fields)
-    out: list[StandardizedEvent] = []
-    for entry in items:
-        if not isinstance(entry, dict):
+def _build(data: dict[str, Any]) -> StandardizedEvent | None:
+    try:
+        return StandardizedEvent(**data)
+    except ValidationError as exc:
+        logger.warning("ETL item dropped (%s %s): %s", data.get("source"), data.get("source_event_id"), exc)
+        return None
+
+
+# ------------------------------------------------------------ categories --
+
+
+def google_category(search: str | None, category_name: str | None) -> EventCategory:
+    """The pilot search that found the place, else Google's own category, else `outros`."""
+    wanted = normalize(search)
+    for query, category in PILOT_SEARCHES:
+        if wanted.startswith(normalize(query) + " "):
+            return category
+    return _first_keyword(normalize(category_name), GOOGLE_KEYWORDS) or "outros"
+
+
+def sympla_category(fmt: str | None, category: str | None) -> EventCategory:
+    """Sympla's `format` slug is the more specific; its `category` is the fallback."""
+    for text in (normalize(fmt), normalize(category)):
+        found = _first_keyword(text, SYMPLA_KEYWORDS)
+        if found:
+            return found
+    return "outros"
+
+
+# ------------------------------------------------------------------ price --
+
+
+def google_price_level(price: str | None) -> int | None:
+    """Google gives "$$" or a range in reais ("R$ 50–100", "R$ 100+"): map to 1..4.
+
+    Bands (decision 2026-10-11): up to R$50 → 1, up to 100 → 2, up to 200 → 3, more → 4.
+    """
+    if not price:
+        return None
+    numbers = [int(n) for n in re.findall(r"\d+", price)]
+    if not numbers:
+        signs = price.count("$")
+        return min(signs, 4) if signs else None
+    if "+" in price:
+        low = min(numbers)
+        return 4 if low >= 200 else 3 if low >= 100 else 2 if low >= 50 else 1
+    high = max(numbers)
+    return 1 if high <= 50 else 2 if high <= 100 else 3 if high <= 200 else 4
+
+
+def sympla_price(item: RawEvent) -> Decimal | None:
+    """Cheapest public ticket in reais; 0 when free; None when the source doesn't say."""
+    tickets = _dict(item.get("detail")).get("tickets")
+    if not isinstance(tickets, list):
+        return None
+    prices: list[Decimal] = []
+    for ticket in tickets:
+        if not isinstance(ticket, dict) or ticket.get("isPrivate") or ticket.get("show") is False:
             continue
-        sid = str(entry.get("source_event_id", "")).strip()
-        if sid not in by_id:
-            continue  # drop hallucinated / unknown ids
-        clean = {k: v for k, v in entry.items() if k in allowed}
-        clean["source"] = source
-        clean["source_event_id"] = sid
-        try:
-            out.append(StandardizedEvent.model_validate(clean))
-        except Exception:
-            logger.debug("ETL transform: skipping invalid event (sid=%s)", sid)
-    return out
+        if ticket.get("isFree"):
+            prices.append(Decimal(0))
+            continue
+        cents = _dict(ticket.get("salePriceMonetary")).get("integer")
+        if isinstance(cents, int) and not isinstance(cents, bool) and cents >= 0:
+            prices.append((Decimal(cents) / 100).quantize(Decimal("0.01")))
+    return min(prices) if prices else None
+
+
+# ----------------------------------------------------------------- places --
+
+
+def transform_google_place(item: RawEvent) -> StandardizedEvent | None:
+    """A Google Maps place (compass/crawler-google-places) as `kind = place`."""
+    if item.get("permanentlyClosed"):
+        return None
+    location = _dict(item.get("location"))
+    lat, lng = _float(location.get("lat")), _float(location.get("lng"))
+    place_id = item.get("placeId")
+    title = _text(item.get("title"), 200)
+    if lat is None or lng is None or not isinstance(place_id, str) or not place_id or not title:
+        return None
+
+    hours = item.get("openingHours")
+    opening_hours = None
+    if isinstance(hours, list):
+        opening_hours = [
+            {"day": str(h["day"])[:40], "hours": str(h["hours"])[:120]}
+            for h in hours
+            if isinstance(h, dict) and h.get("day") and h.get("hours")
+        ] or None
+
+    score = _float(item.get("totalScore"))
+    return _build(
+        {
+            "source": "google_maps",
+            "source_event_id": place_id,
+            "kind": "place",
+            "title": title,
+            "description": clean_description(_str(item.get("description"))),
+            "category": google_category(_str(item.get("searchString")), _str(item.get("categoryName"))),
+            "location_name": _text(item.get("address"), 200),
+            "lat": lat,
+            "long": lng,
+            "price_level": google_price_level(_str(item.get("price"))),
+            "rating": Decimal(str(score)).quantize(Decimal("0.1")) if score is not None else None,
+            "opening_hours": opening_hours,
+            "source_url": _text(item.get("url"), 2000),
+            "cover_url": _text(item.get("imageUrl"), 2000),
+        }
+    )
+
+
+# ----------------------------------------------------------------- events --
+
+
+def transform_sympla_event(item: RawEvent, now: datetime | None = None) -> StandardizedEvent | None:
+    """A Sympla event (hypebridge/sympla-events-scraper) as `kind = event`."""
+    now = now or datetime.now(timezone.utc)
+    detail = _dict(item.get("detail"))
+    if detail.get("cancelled") or item.get("type") not in (None, "NORMAL"):
+        return None  # online / on-demand events have no place to go to
+    location = _dict(item.get("location"))
+    lat, lng = _float(location.get("latitude")), _float(location.get("longitude"))
+    event_id = item.get("id")
+    title = _text(item.get("name"), 200)
+    start = _parse_dt(item.get("startDate"))
+    end = _parse_dt(item.get("endDate")) or start
+    if lat is None or lng is None or event_id in (None, "") or not title or start is None:
+        return None
+    if end is not None and end < now:
+        return None
+
+    venue = _dict(item.get("venue"))
+    images = _dict(item.get("images"))
+    return _build(
+        {
+            "source": "sympla",
+            "source_event_id": str(event_id),
+            "kind": "event",
+            "title": title,
+            "description": clean_description(_str(detail.get("plainDescription"))),
+            "category": sympla_category(_str(item.get("format")), _str(item.get("category"))),
+            "location_name": _text(venue.get("name"), 200),
+            "lat": lat,
+            "long": lng,
+            "event_date": start,
+            "price": sympla_price(item),
+            "source_url": _text(item.get("sourceUrl") or item.get("url"), 2000),
+            "cover_url": _text(images.get("large") or images.get("original"), 2000),
+        }
+    )
