@@ -8,49 +8,16 @@ available (CI starts one; locally: any Postgres 16 + pgvector).
 
 from __future__ import annotations
 
-import os
-import uuid
-from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 import pytest
 
-psycopg = pytest.importorskip("psycopg")
+pytest.importorskip("psycopg")
 
-ADMIN_URL = os.environ.get("TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not ADMIN_URL, reason="TEST_DATABASE_URL not set")
-
-MIGRATION = (
-    Path(__file__).resolve().parents[2]
-    / "supabase"
-    / "migrations"
-    / "20261009010000_match_events.sql"
-)
 DIMS = 1536
 # Lisbon. ~0.009 degrees of latitude is ~1 km.
 LAT, LNG = 38.7223, -9.1393
-
-# Just enough of the Supabase schema for the migration to apply: the roles it
-# grants to, the `extensions` schema that holds pgvector, and the columns it reads.
-BOOTSTRAP = """
-do $$ begin
-  if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
-  if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
-  if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin; end if;
-end $$;
-create schema extensions;
-create extension vector schema extensions;
-create table public.events (
-  id uuid primary key default gen_random_uuid(),
-  title text not null default 'evento',
-  lat double precision not null,
-  long double precision not null,
-  event_date timestamptz,
-  event_embedding extensions.vector(1536)
-);
-"""
 
 
 def _unit(index: int) -> str:
@@ -64,23 +31,6 @@ def _mix(a: int, b: int, weight_a: float) -> str:
     vec[a] = weight_a
     vec[b] = (1 - weight_a**2) ** 0.5
     return "[" + ",".join(str(x) for x in vec) + "]"
-
-
-@pytest.fixture
-def db() -> Iterator[Any]:
-    assert ADMIN_URL is not None
-    name = f"flyer_it_{uuid.uuid4().hex[:12]}"
-    with psycopg.connect(ADMIN_URL, autocommit=True) as admin:
-        admin.execute(f'create database "{name}"')
-    url = psycopg.conninfo.make_conninfo(ADMIN_URL, dbname=name)
-    try:
-        with psycopg.connect(url, autocommit=True) as conn:
-            conn.execute(BOOTSTRAP)
-            conn.execute(MIGRATION.read_text(encoding="utf-8"))
-            yield conn
-    finally:
-        with psycopg.connect(ADMIN_URL, autocommit=True) as admin:
-            admin.execute(f'drop database if exists "{name}" with (force)')
 
 
 def _event(
@@ -175,12 +125,14 @@ def test_results_are_capped_at_200(db: Any) -> None:
 
 @pytest.mark.parametrize("role", ["anon", "authenticated"])
 def test_clients_cannot_call_it(db: Any, role: str) -> None:
-    allowed = db.execute(
-        "select has_function_privilege(%s, 'public.match_events(extensions.vector, double precision, double precision, double precision)', 'execute')",
+    rows = db.execute(
+        "select has_function_privilege(%s, p.oid, 'execute') "
+        "from pg_proc p where p.proname = 'match_events'",
         (role,),
-    ).fetchone()[0]
+    ).fetchall()
 
-    assert allowed is False
+    # Exactly one overload, or PostgREST cannot tell which one to call.
+    assert [r[0] for r in rows] == [False]
 
 
 def test_service_role_can_call_it_with_a_pinned_search_path(db: Any) -> None:

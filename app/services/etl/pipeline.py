@@ -1,64 +1,58 @@
-"""Orchestrate extract → transform → load and report the outcome."""
+"""Load one finished Apify run: extract its dataset → transform → load → link."""
 
 from __future__ import annotations
 
 import logging
 
-from app.core.config import settings
+import httpx
+
 from app.services.db_service import DBService
-from app.services.etl.load import upsert_events
-from app.services.etl.providers.apify_provider import ApifyProvider
-from app.services.etl.providers.base import EventProvider
-from app.services.etl.providers.mock_provider import MockEventProvider
-from app.services.etl.schemas import IngestionReport
-from app.services.etl.transform import standardize_events
+from app.services.etl.apify import fetch_dataset_items
+from app.services.etl.load import link_events_to_places, upsert_events
+from app.services.etl.schemas import IngestionReport, StandardizedEvent
+from app.services.etl.sources import ApifySource
 
 logger = logging.getLogger(__name__)
 
 
-def build_default_provider() -> EventProvider:
-    """Apify when a token is configured; otherwise a mock provider for dev/CI."""
-    if settings.APIFY_TOKEN:
-        return ApifyProvider(
-            settings.APIFY_TOKEN,
-            settings.APIFY_EVENTS_ACTOR,
-            lang=settings.APIFY_EVENTS_LANG,
-            country=settings.APIFY_EVENTS_COUNTRY,
-            canonical_location=settings.APIFY_EVENTS_LOCATION,
-        )
-    logger.warning("APIFY_TOKEN not set — ingestion will use MockEventProvider.")
-    return MockEventProvider()
-
-
-async def run_ingestion(
+async def ingest_dataset(
     db: DBService,
-    location: str,
-    days: int,
-    provider: EventProvider | None = None,
+    http: httpx.AsyncClient,
+    source: ApifySource,
+    dataset_id: str,
+    token: str,
 ) -> IngestionReport:
-    """Run one ingestion pass. Never raises: failures are captured in the report."""
-    provider = provider or build_default_provider()
-    report = IngestionReport(source=provider.source)
+    """Never raises: failures are captured in the report (and logged)."""
+    report = IngestionReport(source=source.name)
 
     try:
-        raw = await provider.fetch(location, days)
-    except Exception as exc:  # noqa: BLE001 (report, don't crash the job)
-        logger.exception("ETL extract failed (source=%s)", provider.source)
+        raw = await fetch_dataset_items(http, token, dataset_id)
+    except Exception as exc:  # report, don't crash the webhook
+        logger.exception("ETL extract failed (source=%s, dataset=%s)", source.name, dataset_id)
         report.errors.append(f"extract: {exc}")
         return report
     report.fetched = len(raw)
 
-    events = await standardize_events(raw, provider.source)
+    events: list[StandardizedEvent] = []
+    seen: set[str] = set()
+    for item in raw:
+        ev = source.transform(item)
+        # The same place can come from two searches; one row per source id.
+        if ev is not None and ev.source_event_id not in seen:
+            seen.add(ev.source_event_id)
+            events.append(ev)
     report.standardized = len(events)
 
     try:
         report.upserted = await upsert_events(db, events)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("ETL load failed (source=%s)", provider.source)
+        report.linked = await link_events_to_places(db, events)
+    except Exception as exc:
+        logger.exception("ETL load failed (source=%s, dataset=%s)", source.name, dataset_id)
         report.errors.append(f"load: {exc}")
 
     logger.info(
-        "ETL run done: source=%s fetched=%d standardized=%d upserted=%d errors=%d",
-        report.source, report.fetched, report.standardized, report.upserted, len(report.errors),
+        "ETL run done: source=%s fetched=%d standardized=%d upserted=%d linked=%d errors=%d",
+        report.source, report.fetched, report.standardized, report.upserted, report.linked,
+        len(report.errors),
     )
     return report

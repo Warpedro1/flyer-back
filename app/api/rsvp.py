@@ -11,7 +11,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
-from app.api.authz import require_event_creator
+from app.api.authz import require_event_creator, require_not_place
 from app.api.deps import DbServiceDep, get_current_user_with_token
 from app.core.limiter import limiter
 from app.models.schemas import (
@@ -165,6 +165,9 @@ async def join_event(
     Idempotent: an existing active RSVP comes back unchanged instead of erroring.
     """
     user_id, jwt = auth
+    event = await db.get_event_by_id(event_id, jwt)
+    if event:
+        require_not_place(event)
     try:
         row = await db.rsvp_join(event_id, user_id)
     except RpcError as exc:

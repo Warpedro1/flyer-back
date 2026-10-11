@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -306,20 +309,37 @@ class DBService:
         user_lat: float,
         user_lng: float,
         radius_km: float,
+        *,
+        kinds: Sequence[str] | None = None,
+        categories: Sequence[str] | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        max_price: Decimal | None = None,
     ) -> list[dict[str, Any]]:
-        """Event ids within the radius, best match first (max 200, no past events).
+        """Event and place ids within the radius, best match first (max 200, no past events).
 
         ``query_embedding=None`` is the fallback for users without an interest
-        vector: the same nearby events, soonest first. See the match_events migration.
+        vector: the same nearby items, soonest first. Filters left as None are not
+        sent and the function's defaults (no filter) apply. See the
+        ``places_catalog`` migration for how places meet the date and price filters.
         """
+        payload: dict[str, Any] = {
+            "query_embedding": query_embedding,
+            "user_lat": user_lat,
+            "user_lng": user_lng,
+            "radius_km": radius_km,
+        }
+        filters: dict[str, Any] = {
+            "kinds": list(kinds) if kinds else None,
+            "categories": list(categories) if categories else None,
+            "date_from": date_from.isoformat() if date_from else None,
+            "date_to": date_to.isoformat() if date_to else None,
+            "max_price": str(max_price) if max_price is not None else None,
+        }
+        payload.update({k: v for k, v in filters.items() if v is not None})
         r = await self._client.post(
             f"{REST_PREFIX}/rpc/match_events",
-            json={
-                "query_embedding": query_embedding,
-                "user_lat": user_lat,
-                "user_lng": user_lng,
-                "radius_km": radius_km,
-            },
+            json=payload,
             headers=self._admin_headers(),
         )
         await self._raise_for_supabase(r)
@@ -797,6 +817,47 @@ class DBService:
         await self._raise_for_supabase(r)
         return len(rows)
 
+    async def list_places_near(
+        self,
+        min_lat: float,
+        max_lat: float,
+        min_lng: float,
+        max_lng: float,
+    ) -> list[dict[str, Any]]:
+        """Places (kind = place) inside a lat/long box. ETL only: service_role."""
+        r = await self._client.get(
+            f"{REST_PREFIX}/events",
+            params=[
+                ("kind", "eq.place"),
+                ("lat", f"gte.{min_lat}"),
+                ("lat", f"lte.{max_lat}"),
+                ("long", f"gte.{min_lng}"),
+                ("long", f"lte.{max_lng}"),
+                ("select", "id,title,lat,long"),
+                ("limit", "5000"),
+            ],
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        return rows if isinstance(rows, list) else []
+
+    async def link_event_to_place(self, source: str, source_event_id: str, place_id: str) -> bool:
+        """Set an imported event's place, unless it already has one (a manual link wins)."""
+        r = await self._client.patch(
+            f"{REST_PREFIX}/events",
+            params={
+                "source": f"eq.{source}",
+                "source_event_id": f"eq.{source_event_id}",
+                "place_id": "is.null",
+            },
+            json={"place_id": place_id},
+            headers={**self._admin_headers(), "Prefer": "return=representation"},
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        return isinstance(rows, list) and len(rows) > 0
+
     async def insert_event_media(
         self,
         event_id: str,
@@ -861,6 +922,29 @@ class DBService:
         if isinstance(rows, list) and rows:
             return rows[0]
         return None
+
+    async def list_place_events(
+        self,
+        place_id: str,
+        jwt: str,
+        *,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Upcoming events at a place, soonest first."""
+        r = await self._client.get(
+            f"{REST_PREFIX}/events",
+            params={
+                "place_id": f"eq.{place_id}",
+                "event_date": f"gte.{datetime.now(timezone.utc).isoformat()}",
+                "select": "*",
+                "order": "event_date.asc",
+                "limit": str(limit),
+            },
+            headers=self._user_headers(jwt),
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        return rows if isinstance(rows, list) else []
 
     async def get_events_by_creator(
         self,
