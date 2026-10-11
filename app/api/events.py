@@ -7,7 +7,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
-from app.api.authz import require_media_paths_owned
+from app.api.authz import require_media_paths_owned, require_place
 from app.api.deps import DbServiceDep, get_current_user_with_token
 from app.core.limiter import limiter
 from app.models.schemas import (
@@ -77,6 +77,8 @@ def _row_to_event_read(
 ) -> EventRead:
     return EventRead(
         id=str(row["id"]),
+        kind=row.get("kind") or "event",
+        place_id=str(row["place_id"]) if row.get("place_id") else None,
         creator_id=str(row["creator_id"]) if row.get("creator_id") is not None else None,
         title=str(row["title"]),
         description=row.get("description"),
@@ -97,6 +99,10 @@ def _row_to_event_read(
         boost_expires_at=_parse_dt(row.get("boost_expires_at")),
         created_at=_parse_dt(row.get("created_at")),
         media=media,
+        opening_hours=row.get("opening_hours") or None,
+        price_level=int(row["price_level"]) if row.get("price_level") is not None else None,
+        source_url=row.get("source_url"),
+        cover_url=row.get("cover_url"),
     )
 
 
@@ -142,6 +148,11 @@ async def discover_events(
         body.latitude,
         body.longitude,
         body.radius_km,
+        kinds=body.kinds,
+        categories=body.categories,
+        date_from=body.date_from,
+        date_to=body.date_to,
+        max_price=body.max_price,
     )
     if not matches:
         return []
@@ -213,6 +224,8 @@ async def create_event(
     user_id, jwt = auth
     # Checked before any write: a rejected path must not leave half an event behind.
     require_media_paths_owned(user_id, (m.media_url for m in body.media))
+    if body.place_id is not None:
+        await require_place(db, body.place_id, jwt)
     base_payload: dict[str, Any] = {
         "title": body.title,
         "description": body.description,
@@ -221,6 +234,8 @@ async def create_event(
         "lat": body.lat,
         "long": body.long,
     }
+    if body.place_id is not None:
+        base_payload["place_id"] = body.place_id
     if body.price is not None:
         base_payload["price"] = str(body.price)
     # capacity None = unlimited event; the other three only matter once it is set,
@@ -292,6 +307,27 @@ async def list_my_events(
         _row_to_event_read(row, media_map.get(str(row["id"]), []))
         for row in rows
     ]
+
+
+@router.get("/{place_id}/events", response_model=list[EventRead])
+@limiter.limit("30/minute")
+async def list_place_events(
+    request: Request,
+    place_id: str,
+    db: DbServiceDep,
+    auth: Annotated[tuple[str, str], Depends(get_current_user_with_token)],
+) -> list[EventRead]:
+    """Upcoming events at a place (kind = place), soonest first."""
+    _, jwt = auth
+    place = await db.get_event_by_id(place_id, jwt)
+    if not place or place.get("kind") != "place":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lugar não encontrado.")
+    rows = await db.list_place_events(place_id, jwt)
+    if not rows:
+        return []
+    ids = [str(r["id"]) for r in rows if r.get("id")]
+    media_map = await db.batch_fetch_event_media(ids, jwt)
+    return [_row_to_event_read(row, media_map.get(str(row["id"]), [])) for row in rows]
 
 
 @router.get("/health")

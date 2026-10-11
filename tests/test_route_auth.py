@@ -26,9 +26,10 @@ PUBLIC_ROUTES: set[tuple[str, str]] = {
     ("GET", "/plans/"),
 }
 
-# Protected by a shared secret instead of a user JWT.
+# Protected by a shared secret instead of a user JWT: the admin token, or the
+# webhook secret Apify sends back when an ingestion run ends.
 ADMIN_PREFIX = "/admin/"
-ADMIN_HEADER = "X-Admin-Token"
+ADMIN_HEADERS = {"X-Admin-Token", "X-Apify-Webhook-Secret"}
 
 
 def _walk(routes: list[Any]) -> Iterator[APIRoute]:
@@ -90,8 +91,8 @@ def test_route_requires_authentication(route: APIRoute, method: str, path: str) 
     if _is_public(method, path):
         return
     if path.startswith(ADMIN_PREFIX):
-        assert ADMIN_HEADER in _header_aliases(route.dependant), (
-            f"{method} {path} is under {ADMIN_PREFIX} but does not read {ADMIN_HEADER}."
+        assert ADMIN_HEADERS & _header_aliases(route.dependant), (
+            f"{method} {path} is under {ADMIN_PREFIX} but reads none of {sorted(ADMIN_HEADERS)}."
         )
         return
     assert AUTH_DEPENDENCIES & set(_calls(route.dependant)), (
