@@ -43,6 +43,26 @@ async def require_event_creator(
     return event
 
 
+async def require_place(db: DBService, place_id: str, jwt: str) -> dict[str, Any]:
+    """Load a place (kind = place) or reject: events can only point at real places."""
+    place = await db.get_event_by_id(place_id, jwt)
+    if not place or place.get("kind") != "place":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="O lugar escolhido não existe.",
+        )
+    return place
+
+
+def require_not_place(event: dict[str, Any]) -> None:
+    """Reject actions that only make sense for events (RSVP, tickets) on a place."""
+    if event.get("kind") == "place":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Lugares não têm inscrição: escolhe um evento.",
+        )
+
+
 def _is_absolute_url(path: str) -> bool:
     return path.startswith("http://") or path.startswith("https://")
 

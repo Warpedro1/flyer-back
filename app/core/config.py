@@ -60,20 +60,16 @@ class Settings(BaseSettings):
     MEDIA_BUCKET: str = "event-media"
     MEDIA_SIGNED_URL_TTL_SECONDS: int = Field(default=3600, ge=60, le=86400)
 
-    # ETL ingestion (scrape real events → LLM standardize → upsert). Opt-in.
+    # Catalogue ingestion (Apify → deterministic transform → upsert). Opt-in: without
+    # these the /admin/ingest endpoints answer 503. Sources and caps: etl/sources.py.
     APIFY_TOKEN: str = ""
-    APIFY_EVENTS_ACTOR: str = "johnvc~google-events-api---access-google-events-data"
-    # Locale passed to the actor: hl = language (ISO 639-1), gl = country (ISO 3166-1).
-    APIFY_EVENTS_LANG: str = "pt"
-    APIFY_EVENTS_COUNTRY: str = ""
-    # Optional canonical Google location ("Lisbon,Lisbon,Portugal"). Anything else aborts
-    # the actor run, so when empty the city is only named in the search query.
-    APIFY_EVENTS_LOCATION: str = ""
-    ETL_TRANSFORM_MODEL: str = "gpt-4o-mini"
-    ETL_INGEST_BATCH_SIZE: int = Field(default=20, ge=1, le=100)
-    # Shared secret required in the X-Admin-Token header to trigger POST /admin/ingest.
-    # When empty, the ingest endpoint is disabled (503).
+    # Shared secret required in the X-Admin-Token header to start POST /admin/ingest.
     ADMIN_INGEST_TOKEN: str = ""
+    # Secret Apify sends back in X-Apify-Webhook-Secret when a run ends. Separate from
+    # the admin token: Apify stores it, so it only opens the webhook.
+    APIFY_WEBHOOK_SECRET: str = ""
+    # Public base URL of this API, for the webhook Apify calls. Empty: the request's.
+    PUBLIC_API_BASE_URL: str = ""
 
     # LangChain / LangGraph style aliases (default to Flyer models when unset)
     EMBEDDINGS_MODEL: str = ""
