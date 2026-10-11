@@ -34,7 +34,7 @@ comment on column public.events.place_id is
 comment on column public.events.opening_hours is
   'Horários do lugar, como a fonte os dá: [{"day": "segunda-feira", "hours": "08:00–22:00"}].';
 comment on column public.events.price_level is
-  'Nível de preço do lugar, de 1 ($) a 4 ($$$$). Os eventos usam price.';
+  'Nível de preço do lugar, de 1 a 4 (barato a caro). Os eventos usam price.';
 comment on column public.events.source_url is 'Página do item na fonte (Google Maps, Sympla).';
 comment on column public.events.cover_url is 'Imagem pública da fonte, quando o evento não tem media própria.';
 
@@ -86,7 +86,9 @@ returns table (id uuid, similarity real, distance_km double precision)
 language sql
 stable
 set search_path = public, extensions
-as $$
+-- Tag própria ($fn$) e não $$: o SQL Editor do Supabase parte o script em
+-- comandos e confunde-se com $$ seguidos.
+as $fn$
   with nearby as (
     select e.id,
            e.event_date,
@@ -124,7 +126,7 @@ as $$
      n.event_date asc nulls last,
      n.id
    limit 200;
-$$;
+$fn$;
 
 -- Só o backend a chama (service_role). Ver a regra das funções no CLAUDE.md.
 revoke execute on function public.match_events(extensions.vector, double precision, double precision, double precision, text[], text[], timestamptz, timestamptz, numeric)
