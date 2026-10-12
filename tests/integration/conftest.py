@@ -23,6 +23,7 @@ EVENT_MIGRATIONS = (
     "20260618000000_events_ingestion.sql",
     "20261009010000_match_events.sql",
     "20261011000000_places_catalog.sql",
+    "20261012000000_trophy_templates_one_per_event.sql",
 )
 
 # The `events` columns that existed before any versioned migration (the table itself
@@ -44,6 +45,14 @@ create table public.events (
   event_date timestamptz,
   price numeric default 0.00,
   event_embedding extensions.vector(1536)
+);
+create table public.trophy_templates (
+  id uuid primary key default gen_random_uuid(),
+  event_id uuid references public.events (id) on delete cascade,
+  name text not null,
+  icon_url text,
+  description text,
+  created_at timestamptz default now()
 );
 """
 
