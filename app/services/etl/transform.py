@@ -10,7 +10,7 @@ import html
 import logging
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -23,6 +23,8 @@ from app.services.etl.taxonomy import GOOGLE_KEYWORDS, PILOT_SEARCHES, SYMPLA_KE
 logger = logging.getLogger(__name__)
 
 MAX_DESCRIPTION = 2000
+# Used when the source gives no end (or one before the start).
+DEFAULT_EVENT_DURATION = timedelta(hours=4)
 
 
 # ----------------------------------------------------------------- helpers --
@@ -216,10 +218,13 @@ def transform_sympla_event(item: RawEvent, now: datetime | None = None) -> Stand
     event_id = item.get("id")
     title = _text(item.get("name"), 200)
     start = _parse_dt(item.get("startDate"))
-    end = _parse_dt(item.get("endDate")) or start
     if lat is None or lng is None or event_id in (None, "") or not title or start is None:
         return None
-    if end is not None and end < now:
+    end = _parse_dt(item.get("endDate"))
+    if end is None or end <= start:
+        # Check-in closes at the end: without a usable one, four hours (decision 2026-10-12).
+        end = start + DEFAULT_EVENT_DURATION
+    if end < now:
         return None
 
     venue = _dict(item.get("venue"))
@@ -236,6 +241,8 @@ def transform_sympla_event(item: RawEvent, now: datetime | None = None) -> Stand
             "lat": lat,
             "long": lng,
             "event_date": start,
+            "ends_at": end,
+            "checkin_opens_at": start,
             "price": sympla_price(item),
             "source_url": _text(item.get("sourceUrl") or item.get("url"), 2000),
             "cover_url": _text(images.get("large") or images.get("original"), 2000),

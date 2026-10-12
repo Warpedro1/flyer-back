@@ -84,7 +84,14 @@ def test_a_failed_event_embedding_is_logged_as_an_error(
     with patch("app.api.events.ai_service.generate_embedding", failing):
         with caplog.at_level(logging.ERROR, logger="app.api.events"):
             response = TestClient(app).post(
-                "/events/", json={"title": "Concerto", "lat": 38.7, "long": -9.1}
+                "/events/",
+                json={
+                    "title": "Concerto",
+                    "lat": 38.7,
+                    "long": -9.1,
+                    "event_date": "2026-10-16T20:00:00",
+                    "ends_at": "2026-10-16T23:00:00",
+                },
             )
 
     assert response.status_code == 201

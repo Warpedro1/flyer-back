@@ -24,6 +24,7 @@ EVENT_MIGRATIONS = (
     "20261009010000_match_events.sql",
     "20261011000000_places_catalog.sql",
     "20261012000000_trophy_templates_one_per_event.sql",
+    "20261013000000_event_end_and_checkin_window.sql",
 )
 
 # The `events` columns that existed before any versioned migration (the table itself
