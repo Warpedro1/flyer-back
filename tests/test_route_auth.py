@@ -17,6 +17,7 @@ from fastapi.routing import APIRoute
 from app.api.deps import (
     get_current_user,
     get_current_user_pending_code,
+    get_current_user_pending_profile,
     get_current_user_with_token,
 )
 from app.main import app
@@ -26,12 +27,16 @@ AUTH_DEPENDENCIES: set[Callable[..., Any]] = {get_current_user, get_current_user
 # The e-mail code routes run before the code is verified: they authenticate the
 # token but not the second factor. Nowhere else may use that dependency.
 EMAIL_CODE_PREFIX = "/auth/email-code/"
+# Completing CPF and phone runs before the profile is complete (but after the code).
+PROFILE_PREFIX = "/auth/profile/"
 
 # Reachable without a token, on purpose. Anything added here is public to the internet.
 PUBLIC_ROUTES: set[tuple[str, str]] = {
     ("GET", "/"),
     ("GET", "/health"),
     ("GET", "/plans/"),
+    # Sign-up by e-mail: no account yet. Rate limited per client (app/api/auth.py).
+    ("POST", "/auth/signup"),
 }
 
 # Protected by a shared secret instead of a user JWT: the admin token, or the
@@ -109,6 +114,12 @@ def test_route_requires_authentication(route: APIRoute, method: str, path: str) 
         return
     assert get_current_user_pending_code not in calls, (
         f"{method} {path} skips the e-mail code: only {EMAIL_CODE_PREFIX}* may do that."
+    )
+    if path.startswith(PROFILE_PREFIX):
+        assert get_current_user_pending_profile in calls, f"{method} {path} must authenticate the token."
+        return
+    assert get_current_user_pending_profile not in calls, (
+        f"{method} {path} skips the CPF/phone check: only {PROFILE_PREFIX}* may do that."
     )
     assert AUTH_DEPENDENCIES & calls, (
         f"{method} {path} does not depend on get_current_user*. Add the dependency, "

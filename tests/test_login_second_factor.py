@@ -45,6 +45,8 @@ def db() -> Iterator[MagicMock]:
     fake.verify_email_code = AsyncMock(return_value=True)
     fake.mark_session_verified = AsyncMock()
     fake.is_session_verified = AsyncMock(return_value=False)
+    # CPF/phone already on file: this file is about the e-mail code.
+    fake.is_profile_complete = AsyncMock(return_value=True)
     app.dependency_overrides[get_db_service] = lambda: fake
     with patch("app.api.deps.DBService", return_value=fake):
         yield fake

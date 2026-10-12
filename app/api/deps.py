@@ -16,6 +16,8 @@ bearer_scheme = HTTPBearer(auto_error=True)
 
 # `detail` the app recognises to send the user to the e-mail code screen.
 EMAIL_CODE_REQUIRED = "email_code_required"
+# `detail` the app recognises to send the user to "complete your sign-up" (CPF, phone).
+PROFILE_INCOMPLETE = "profile_incomplete"
 
 # Sessions that already verified the e-mail code, so a password session does not cost
 # a database round trip per request. Per instance and bounded: a miss only means one
@@ -24,16 +26,29 @@ _VERIFIED_CACHE_SIZE = 10_000
 _verified_sessions: "OrderedDict[str, None]" = OrderedDict()
 
 
+# Accounts that already have CPF and phone (never removed: CPF cannot be unset).
+_complete_profiles: "OrderedDict[str, None]" = OrderedDict()
+
+
 def reset_verified_sessions_cache() -> None:
     """For tests."""
     _verified_sessions.clear()
+    _complete_profiles.clear()
+
+
+def _remember(cache: "OrderedDict[str, None]", key: str) -> None:
+    cache[key] = None
+    cache.move_to_end(key)
+    while len(cache) > _VERIFIED_CACHE_SIZE:
+        cache.popitem(last=False)
+
+
+def remember_complete_profile(user_id: str) -> None:
+    _remember(_complete_profiles, user_id)
 
 
 def remember_verified_session(session_id: str) -> None:
-    _verified_sessions[session_id] = None
-    _verified_sessions.move_to_end(session_id)
-    while len(_verified_sessions) > _VERIFIED_CACHE_SIZE:
-        _verified_sessions.popitem(last=False)
+    _remember(_verified_sessions, session_id)
 
 
 async def _session_verified(request: Request, session_id: str) -> bool:
@@ -47,18 +62,35 @@ async def _session_verified(request: Request, session_id: str) -> bool:
     return verified
 
 
-async def _authenticated_payload(request: Request, token: str) -> dict[str, Any]:
-    """The validated JWT payload, with the e-mail code verified when the session needs it.
+async def _profile_complete(request: Request, user_id: str) -> bool:
+    if user_id in _complete_profiles:
+        return True
+    client = getattr(request.app.state, "http_client", None)
+    complete = await DBService(client).is_profile_complete(user_id)
+    if complete:
+        remember_complete_profile(user_id)
+    return complete
 
-    A password session only reaches the API after the 6-digit code sent to the
-    account's e-mail (decisions 2026-10-12). Enforced here and not in the app: whoever
-    has the password can call Supabase directly and skip any screen.
+
+async def _authenticated_payload(
+    request: Request, token: str, *, require_profile: bool = True
+) -> dict[str, Any]:
+    """The validated JWT payload, after the account checks (decisions 2026-10-12).
+
+    1. A password session only reaches the API after the 6-digit code sent to the
+       account's e-mail.
+    2. Every account needs CPF and phone (Google ones complete them on first access).
+
+    Enforced here and not in the app: whoever has a token can call the API directly
+    and skip any screen.
     """
     payload = decode_access_token(token, settings.SUPABASE_JWT_SECRET)
     if session_needs_email_code(payload):
         session_id = payload.get("session_id")
         if not isinstance(session_id, str) or not await _session_verified(request, session_id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=EMAIL_CODE_REQUIRED)
+    if require_profile and not await _profile_complete(request, payload["sub"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=PROFILE_INCOMPLETE)
     return payload
 
 
@@ -109,6 +141,19 @@ async def get_current_user_pending_code(
         session_id=session_id if isinstance(session_id, str) and session_id else None,
         needs_code=session_needs_email_code(payload),
     )
+
+
+async def get_current_user_pending_profile(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
+) -> str:
+    """Authenticate (with the e-mail code) without requiring CPF and phone.
+
+    Only for the `/auth/profile/*` routes, which exist to complete them
+    (`tests/test_route_auth.py` refuses it anywhere else).
+    """
+    payload = await _authenticated_payload(request, credentials.credentials, require_profile=False)
+    return str(payload["sub"])
 
 
 async def get_http_client(request: Request) -> httpx.AsyncClient:
