@@ -482,22 +482,31 @@ class DBService:
             media_list.sort(key=lambda m: m.order_index)
         return by_event
 
-    async def get_event_coords(self, event_id: str, jwt: str) -> tuple[float, float] | None:
-        r = await self._client.get(
-            f"{REST_PREFIX}/events",
-            params={"id": f"eq.{event_id}", "select": "lat,long"},
-            headers=self._user_headers(jwt),
+    async def create_trophy_templates(self, rows: list[dict[str, Any]]) -> None:
+        """Insert custom trophy templates (one per event occurrence). service_role."""
+        if not rows:
+            return
+        r = await self._client.post(
+            f"{REST_PREFIX}/trophy_templates",
+            json=rows,
+            headers={**self._admin_headers(), "Prefer": "return=minimal"},
         )
         await self._raise_for_supabase(r)
-        rows = r.json()
-        if not (isinstance(rows, list) and rows):
-            return None
-        row = rows[0]
-        lat = row.get("lat")
-        lng = row.get("long")
-        if lat is None or lng is None:
-            return None
-        return float(lat), float(lng)
+
+    async def ensure_default_trophy_template(self, event_id: str, name: str) -> str | None:
+        """The event's trophy template, creating the default one if it has none.
+
+        Safe when two people check in at once: `event_id` is unique, the second
+        insert is ignored and the id is read back.
+        """
+        r = await self._client.post(
+            f"{REST_PREFIX}/trophy_templates",
+            params={"on_conflict": "event_id"},
+            json={"event_id": event_id, "name": name},
+            headers={**self._admin_headers(), "Prefer": "resolution=ignore-duplicates,return=minimal"},
+        )
+        await self._raise_for_supabase(r)
+        return await self.get_trophy_template_by_event(event_id)
 
     async def get_trophy_template_by_event(self, event_id: str) -> str | None:
         r = await self._client.get(

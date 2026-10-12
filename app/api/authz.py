@@ -67,6 +67,21 @@ def _is_absolute_url(path: str) -> bool:
     return path.startswith("http://") or path.startswith("https://")
 
 
+_IMAGE_EXTENSIONS = frozenset({"jpg", "jpeg", "png", "webp", "gif"})
+
+
+def require_trophy_icon(user_id: str, path: str) -> None:
+    """A trophy icon is an image the creator uploaded to Flyer: no external URLs
+    (they could change or track whoever opens the trophy), no videos, nobody else's file."""
+    extension = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    if _is_absolute_url(path) or extension not in _IMAGE_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="O ícone do troféu tem de ser uma imagem enviada para o Flyer.",
+        )
+    require_media_paths_owned(user_id, [path])
+
+
 def require_media_paths_owned(user_id: str, paths: Iterable[str]) -> None:
     """Reject Storage paths outside the user's own `{user_id}/` folder.
 

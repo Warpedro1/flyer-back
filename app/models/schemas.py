@@ -409,6 +409,21 @@ class EventRecurrence(BaseModel):
         return self
 
 
+class TrophyCustomization(BaseModel):
+    """The trophy an event gives at check-in, as its creator customised it.
+
+    Every field is optional: what is left out uses the default trophy
+    ("Presença: <título>", no description, the Flyer icon).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=300)
+    # Path of an image the creator uploaded to the event-media bucket ({user_id}/...).
+    icon_url: str | None = Field(default=None, min_length=1, max_length=500)
+
+
 class EventCreate(BaseModel):
     """Payload for creating a new event."""
 
@@ -424,6 +439,8 @@ class EventCreate(BaseModel):
     price: Decimal | None = Field(default=None, ge=0)
     # The place (kind = place) where this event happens, chosen by the creator.
     place_id: str | None = Field(default=None, min_length=1, max_length=64)
+    # The trophy for checking in; None = the default trophy, created at first check-in.
+    trophy: TrophyCustomization | None = None
     media: list[EventMediaCreate] = Field(default_factory=list, max_length=10)
     recurrence: EventRecurrence | None = None
     # None = no limit: everybody joins as `confirmed` and the waitlist is never used.
