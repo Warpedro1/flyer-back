@@ -14,10 +14,18 @@ import pytest
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
 
-from app.api.deps import get_current_user, get_current_user_with_token
+from app.api.deps import (
+    get_current_user,
+    get_current_user_pending_code,
+    get_current_user_with_token,
+)
 from app.main import app
 
 AUTH_DEPENDENCIES: set[Callable[..., Any]] = {get_current_user, get_current_user_with_token}
+
+# The e-mail code routes run before the code is verified: they authenticate the
+# token but not the second factor. Nowhere else may use that dependency.
+EMAIL_CODE_PREFIX = "/auth/email-code/"
 
 # Reachable without a token, on purpose. Anything added here is public to the internet.
 PUBLIC_ROUTES: set[tuple[str, str]] = {
@@ -95,7 +103,14 @@ def test_route_requires_authentication(route: APIRoute, method: str, path: str) 
             f"{method} {path} is under {ADMIN_PREFIX} but reads none of {sorted(ADMIN_HEADERS)}."
         )
         return
-    assert AUTH_DEPENDENCIES & set(_calls(route.dependant)), (
+    calls = set(_calls(route.dependant))
+    if path.startswith(EMAIL_CODE_PREFIX):
+        assert get_current_user_pending_code in calls, f"{method} {path} must authenticate the token."
+        return
+    assert get_current_user_pending_code not in calls, (
+        f"{method} {path} skips the e-mail code: only {EMAIL_CODE_PREFIX}* may do that."
+    )
+    assert AUTH_DEPENDENCIES & calls, (
         f"{method} {path} does not depend on get_current_user*. Add the dependency, "
         "or add the route to PUBLIC_ROUTES if it really is public."
     )

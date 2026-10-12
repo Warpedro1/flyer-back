@@ -9,7 +9,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from app.api import admin, chat, events, plans, rsvp, social, trophies
+from app.api import admin, auth, chat, events, plans, rsvp, social, trophies
 from app.core.config import settings
 from app.core.limiter import limiter
 
@@ -46,6 +46,7 @@ app.add_middleware(
     expose_headers=[events.DISCOVERY_MODE_HEADER],
 )
 
+app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(events.router)
 app.include_router(rsvp.router)
