@@ -8,6 +8,7 @@ from typing import Any, Literal, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.br_documents import normalize_cpf, normalize_phone
 from app.core.tz import to_local_naive
 
 EMBEDDING_DIMENSIONS = 1536
@@ -621,6 +622,118 @@ class ScanResult(BaseModel):
     ok: bool = True
     status: RsvpStatus
     attendee: ProfileBrief
+
+
+# ----------------------------------------------------------------- account --
+
+# No commas, parentheses or quotes: the address goes into a PostgREST `or=(...)` filter.
+_EMAIL_RE = re.compile(r'^[^@\s,()"]+@[^@\s,()"]+\.[^@\s,()"]+$')
+
+
+def _valid_password(value: str) -> str:
+    """8+ characters with at least one letter and one digit (decision 2026-10-12)."""
+    if len(value) < 8 or not any(c.isalpha() for c in value) or not any(c.isdigit() for c in value):
+        raise ValueError("A senha precisa de 8+ caracteres, com letras e números.")
+    return value
+
+
+def _valid_cpf(value: str) -> str:
+    cpf = normalize_cpf(value)
+    if cpf is None:
+        raise ValueError("CPF inválido.")
+    return cpf
+
+
+def _valid_phone(value: str) -> str:
+    phone = normalize_phone(value)
+    if phone is None:
+        raise ValueError("Celular inválido: usa DDD + número com 9 dígitos.")
+    return phone
+
+
+class SignupIn(BaseModel):
+    """Sign-up by e-mail (decisions 2026-10-12): CPF, phone and e-mail are unique."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=100)
+    email: str = Field(max_length=254)
+    cpf: str = Field(max_length=20)
+    phone: str = Field(max_length=25)
+    password: str = Field(max_length=72)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v: str) -> str:
+        name = v.strip()
+        if not name:
+            raise ValueError("Indica o teu nome.")
+        return name
+
+    @field_validator("email")
+    @classmethod
+    def _email(cls, v: str) -> str:
+        email = v.strip().lower()
+        if not _EMAIL_RE.match(email):
+            raise ValueError("E-mail inválido.")
+        return email
+
+    @field_validator("cpf")
+    @classmethod
+    def _cpf(cls, v: str) -> str:
+        return _valid_cpf(v)
+
+    @field_validator("phone")
+    @classmethod
+    def _phone(cls, v: str) -> str:
+        return _valid_phone(v)
+
+    @field_validator("password")
+    @classmethod
+    def _password(cls, v: str) -> str:
+        return _valid_password(v)
+
+
+class ProfileIdentityIn(BaseModel):
+    """CPF and phone for an account that has none yet (Google, first access)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cpf: str = Field(max_length=20)
+    phone: str = Field(max_length=25)
+
+    @field_validator("cpf")
+    @classmethod
+    def _cpf(cls, v: str) -> str:
+        return _valid_cpf(v)
+
+    @field_validator("phone")
+    @classmethod
+    def _phone(cls, v: str) -> str:
+        return _valid_phone(v)
+
+
+class ProfileIdentityStatus(BaseModel):
+    """Whether the account has CPF and phone; the owner's own, masked."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    complete: bool
+    cpf_masked: str | None = None
+    phone_masked: str | None = None
+
+
+class EmailCodeStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    required: bool
+    verified: bool
+
+
+class EmailCodeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(pattern=r"^\d{6}$")
 
 
 EventRead.model_rebuild()

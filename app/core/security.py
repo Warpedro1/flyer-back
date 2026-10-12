@@ -78,3 +78,15 @@ def _validate_subject(payload: dict[str, Any]) -> dict[str, Any]:
             headers={"WWW-Authenticate": "Bearer"},
         )
     return payload
+
+
+def session_needs_email_code(payload: dict[str, Any]) -> bool:
+    """Whether this session must verify the e-mail code before using the API.
+
+    Only sessions opened with a password (decision 2026-10-12). Google, and the links
+    sent by e-mail (confirmation, recovery, codes), already proved the address.
+    """
+    amr = payload.get("amr")
+    if not isinstance(amr, list):
+        return False
+    return any(isinstance(entry, dict) and entry.get("method") == "password" for entry in amr)
