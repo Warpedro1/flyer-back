@@ -50,6 +50,17 @@ def test_filter_future_events_treats_naive_datetimes_as_utc() -> None:
     assert [r["id"] for r in kept] == ["f"]
 
 
+def test_an_event_in_progress_is_kept_until_it_ends() -> None:
+    # Check-in opens at the start: an event that already started must stay findable.
+    now = datetime.now(timezone.utc)
+    running = {"id": "running", "event_date": _iso(now - timedelta(hours=1)), "ends_at": _iso(now + timedelta(hours=2))}
+    over = {"id": "over", "event_date": _iso(now - timedelta(hours=5)), "ends_at": _iso(now - timedelta(hours=1))}
+
+    kept = filter_future_events([running, over])
+
+    assert [r["id"] for r in kept] == ["running"]
+
+
 @pytest.mark.asyncio
 async def test_ensure_interest_embedding_rebuilds_from_preferences_text() -> None:
     db = MagicMock()

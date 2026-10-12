@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -45,7 +46,14 @@ def test_event_read_exposes_capacity_columns() -> None:
 
 
 def test_event_create_is_unlimited_unless_a_capacity_is_given() -> None:
-    body = EventCreate(title="Jam", lat=38.7, long=-9.1)
+    body = EventCreate(
+        title="Jam",
+        lat=38.7,
+        long=-9.1,
+        # Naive = Recife wall-clock time, as the app sends it.
+        event_date=datetime(2026, 10, 16, 20, 0),  # noqa: DTZ001
+        ends_at=datetime(2026, 10, 16, 23, 0),  # noqa: DTZ001
+    )
 
     assert body.capacity is None
     assert body.waitlist_enabled is True

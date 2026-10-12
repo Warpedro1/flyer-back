@@ -218,6 +218,29 @@ def test_a_sympla_event_becomes_an_event() -> None:
     assert event.description == "Casal sensação das redes.\n\nComédia ao vivo."
 
 
+def test_a_sympla_event_keeps_its_end_and_opens_check_in_at_the_start() -> None:
+    # Check-in closes when the event ends (decision 2026-10-12).
+    event = transform_sympla_event(sympla_item(), now=NOW)
+
+    assert event is not None
+    assert event.ends_at == datetime(2026, 10, 18, 2, 0, tzinfo=timezone.utc)
+    assert event.checkin_opens_at == event.event_date
+
+
+def test_without_an_end_a_sympla_event_lasts_four_hours() -> None:
+    event = transform_sympla_event(sympla_item(endDate=None), now=NOW)
+
+    assert event is not None
+    assert event.ends_at == datetime(2026, 10, 18, 4, 0, tzinfo=timezone.utc)
+
+
+def test_an_end_before_the_start_is_replaced_by_four_hours() -> None:
+    event = transform_sympla_event(sympla_item(endDate="2026-10-17T20:00:00-03:00"), now=NOW)
+
+    assert event is not None
+    assert event.ends_at == datetime(2026, 10, 18, 4, 0, tzinfo=timezone.utc)
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

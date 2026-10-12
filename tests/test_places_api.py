@@ -151,7 +151,8 @@ def test_the_taxonomy_has_the_agreed_slugs() -> None:
 
 def _create(body: dict[str, Any]) -> httpx.Response:
     with patch("app.api.events.ai_service.generate_embedding", AsyncMock(return_value=VEC)):
-        return TestClient(app).post("/events/", json=body)
+        when = {"event_date": "2026-10-16T20:00:00", "ends_at": "2026-10-16T23:00:00"}
+        return TestClient(app).post("/events/", json={**when, **body})
 
 
 def test_an_event_can_be_created_at_a_place(db: MagicMock) -> None:

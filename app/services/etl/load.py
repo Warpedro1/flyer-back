@@ -41,6 +41,9 @@ def _row(ev: StandardizedEvent, embedding: list[float] | None) -> dict[str, Any]
         "lat": ev.lat,
         "long": ev.long,
         "event_date": ev.event_date.isoformat() if ev.event_date else None,
+        # `checkin_closed_at` is left out: nobody owns an imported event.
+        "ends_at": ev.ends_at.isoformat() if ev.ends_at else None,
+        "checkin_opens_at": ev.checkin_opens_at.isoformat() if ev.checkin_opens_at else None,
         "price": str(ev.price) if ev.price is not None else None,
         "price_level": ev.price_level,
         "rating": str(ev.rating) if ev.rating is not None else None,

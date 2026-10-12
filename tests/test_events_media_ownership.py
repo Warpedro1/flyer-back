@@ -17,6 +17,8 @@ def _event_body(media_url: str) -> dict[str, object]:
         "title": "Concerto",
         "lat": 38.7,
         "long": -9.1,
+        "event_date": "2026-10-16T20:00:00",
+        "ends_at": "2026-10-16T23:00:00",
         "media": [{"media_url": media_url, "type": "image"}],
     }
 
