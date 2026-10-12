@@ -7,7 +7,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
-from app.api.authz import require_media_paths_owned, require_place
+from app.api.authz import require_media_paths_owned, require_place, require_trophy_icon
 from app.api.deps import DbServiceDep, get_current_user_with_token
 from app.core.limiter import limiter
 from app.models.schemas import (
@@ -23,6 +23,7 @@ from app.services.ai_service import ai_service
 from app.services.event_recurrence import expand_recurrence
 from app.services.interest_sync import parse_interest_embedding
 from app.services.onboarding_pipeline import ensure_interest_embedding
+from app.services.trophies import default_trophy_name
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +225,8 @@ async def create_event(
     user_id, jwt = auth
     # Checked before any write: a rejected path must not leave half an event behind.
     require_media_paths_owned(user_id, (m.media_url for m in body.media))
+    if body.trophy is not None and body.trophy.icon_url is not None:
+        require_trophy_icon(user_id, body.trophy.icon_url)
     if body.place_id is not None:
         await require_place(db, body.place_id, jwt)
     base_payload: dict[str, Any] = {
@@ -280,6 +283,21 @@ async def create_event(
             for m in body.media
         ]
         await db.insert_event_media_rows(media_rows, jwt)
+
+    # A custom trophy is written now, one per occurrence (each date is its own event
+    # and its own trophy). Without one, check-in creates the default trophy.
+    if body.trophy is not None and all_ids:
+        await db.create_trophy_templates(
+            [
+                {
+                    "event_id": eid,
+                    "name": body.trophy.name or default_trophy_name(body.title),
+                    "description": body.trophy.description,
+                    "icon_url": body.trophy.icon_url,
+                }
+                for eid in all_ids
+            ]
+        )
 
     await _embed_events_best_effort(db, all_ids, body)
 
