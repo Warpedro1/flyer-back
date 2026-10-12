@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -13,7 +14,10 @@ import httpx
 from app.core.config import settings
 from app.models.schemas import ChatSender, EventMediaRead, FollowStatus, MediaType
 
+logger = logging.getLogger(__name__)
+
 REST_PREFIX = "/rest/v1"
+AUTH_PREFIX = "/auth/v1"
 STORAGE_PREFIX = "/storage/v1"
 
 POSTGRES_UNIQUE_VIOLATION = "23505"
@@ -131,6 +135,138 @@ class DBService:
         if code == POSTGRES_UNIQUE_VIOLATION:
             raise UniqueViolationError from None
         response.raise_for_status()
+
+    # ------------------------------------------------- login second factor --
+
+    async def send_email_code(self, email: str) -> None:
+        """Ask Supabase Auth to e-mail a 6-digit code (template "Magic Link").
+
+        `create_user: false`: this never creates an account for an unknown address.
+        """
+        r = await self._client.post(
+            f"{AUTH_PREFIX}/otp",
+            json={"email": email, "create_user": False},
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+
+    async def verify_email_code(self, email: str, code: str) -> bool:
+        """Check the code with Supabase Auth. True if it is valid.
+
+        Supabase answers a valid code with a new session; this backend only needs the
+        answer, so that extra session is revoked straight away.
+        """
+        r = await self._client.post(
+            f"{AUTH_PREFIX}/verify",
+            json={"type": "email", "email": email, "token": code},
+            headers=self._admin_headers(),
+        )
+        if r.status_code in (400, 401, 403, 404, 422):
+            return False
+        await self._raise_for_supabase(r)
+        data = r.json() if r.content else {}
+        extra_token = data.get("access_token") if isinstance(data, dict) else None
+        if extra_token:
+            logout = await self._client.post(
+                f"{AUTH_PREFIX}/logout",
+                params={"scope": "local"},
+                headers={"apikey": settings.SUPABASE_KEY, "Authorization": f"Bearer {extra_token}"},
+            )
+            if not logout.is_success:
+                logger.warning("Could not revoke the session created to check an e-mail code")
+        return True
+
+    async def mark_session_verified(self, session_id: str, user_id: str) -> None:
+        r = await self._client.post(
+            f"{REST_PREFIX}/login_second_factor",
+            params={"on_conflict": "session_id"},
+            json={"session_id": session_id, "user_id": user_id},
+            headers={**self._admin_headers(), "Prefer": "resolution=ignore-duplicates,return=minimal"},
+        )
+        await self._raise_for_supabase(r)
+
+    async def is_session_verified(self, session_id: str) -> bool:
+        r = await self._client.get(
+            f"{REST_PREFIX}/login_second_factor",
+            params={"session_id": f"eq.{session_id}", "select": "session_id", "limit": "1"},
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        return isinstance(rows, list) and bool(rows)
+
+    # ------------------------------------------------ account: CPF and phone --
+
+    async def signup_user(self, *, email: str, password: str, data: dict[str, Any]) -> None:
+        """Create the account in Supabase Auth; it e-mails the confirmation link.
+
+        The profile trigger copies `data` (name, cpf, phone) into `profiles`, whose
+        unique indexes reject a repeated CPF or phone even under a race.
+        """
+        r = await self._client.post(
+            f"{AUTH_PREFIX}/signup",
+            params={"redirect_to": f"{settings.APP_URL.rstrip('/')}/"},
+            json={"email": email, "password": password, "data": data},
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+
+    async def find_identity_conflicts(
+        self,
+        *,
+        email: str | None,
+        cpf: str,
+        phone: str,
+        exclude_user_id: str | None = None,
+    ) -> set[str]:
+        """Which of e-mail, CPF and phone already belong to another account."""
+        filters = [f"cpf.eq.{cpf}", f"phone.eq.{phone}"]
+        if email:
+            filters.append(f"email.eq.{email}")
+        params = {"select": "id,cpf,phone,email", "or": f"({','.join(filters)})", "limit": "10"}
+        if exclude_user_id:
+            params["id"] = f"neq.{exclude_user_id}"
+        r = await self._client.get(
+            f"{REST_PREFIX}/profiles", params=params, headers=self._admin_headers()
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        taken: set[str] = set()
+        for row in rows if isinstance(rows, list) else []:
+            if row.get("cpf") == cpf:
+                taken.add("cpf")
+            if row.get("phone") == phone:
+                taken.add("phone")
+            if email and str(row.get("email") or "").lower() == email:
+                taken.add("email")
+        return taken
+
+    async def get_profile_identity(self, user_id: str) -> dict[str, Any]:
+        """The owner's own CPF and phone (never returned for anyone else)."""
+        r = await self._client.get(
+            f"{REST_PREFIX}/profiles",
+            params={"id": f"eq.{user_id}", "select": "cpf,phone", "limit": "1"},
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        return dict(rows[0]) if isinstance(rows, list) and rows else {"cpf": None, "phone": None}
+
+    async def is_profile_complete(self, user_id: str) -> bool:
+        identity = await self.get_profile_identity(user_id)
+        return bool(identity.get("cpf")) and bool(identity.get("phone"))
+
+    async def complete_profile_identity(self, user_id: str, cpf: str, phone: str) -> bool:
+        """Set CPF and phone once. False when the account already had a CPF."""
+        r = await self._client.patch(
+            f"{REST_PREFIX}/profiles",
+            params={"id": f"eq.{user_id}", "cpf": "is.null"},
+            json={"cpf": cpf, "phone": phone},
+            headers={**self._admin_headers(), "Prefer": "return=representation"},
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        return isinstance(rows, list) and bool(rows)
 
     async def get_or_create_chat(self, user_id: str, jwt: str) -> str:
         """Return the single ai_chats.id for this user (UNIQUE user_id)."""
