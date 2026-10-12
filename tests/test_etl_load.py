@@ -160,3 +160,21 @@ async def test_without_events_there_is_nothing_to_link() -> None:
 
     assert await link_events_to_places(db, [_place()]) == 0
     db.list_places_near.assert_not_called()
+
+
+async def test_rows_carry_the_end_and_the_check_in_opening() -> None:
+    from datetime import datetime, timezone
+
+    db = _db()
+    start = datetime(2026, 10, 18, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 10, 18, 2, 0, tzinfo=timezone.utc)
+
+    with patch("app.services.etl.load.ai_service.generate_embeddings", AsyncMock(return_value=[VEC, VEC])):
+        await upsert_events(db, [_event(1, event_date=start, ends_at=end, checkin_opens_at=start), _place()])
+
+    event_row, place_row = db.upsert_events.await_args.args[0]
+    assert event_row["ends_at"] == end.isoformat()
+    assert event_row["checkin_opens_at"] == start.isoformat()
+    assert place_row["ends_at"] is None
+    # Nobody owns an imported event: a re-import never touches a manual close.
+    assert "checkin_closed_at" not in event_row

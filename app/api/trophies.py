@@ -1,6 +1,7 @@
 """Trophy and check-in endpoints."""
 
-from datetime import datetime
+import logging
+from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -10,16 +11,34 @@ from app.core.config import settings
 from app.core.geo import haversine_meters
 from app.core.limiter import limiter
 from app.models.schemas import CheckInRequest, TrophyRead
+from app.services.checkin_window import checkin_state, refusal_detail
 from app.services.db_service import DBService, UniqueViolationError
 from app.services.trophies import default_trophy_name
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/trophies", tags=["trophies"])
+
+# What check-in reads from the event: no `select=*`, the row carries a 1536-d embedding.
+_CHECKIN_COLUMNS = (
+    "id,kind,title,lat,long,event_date,ends_at,checkin_opens_at,checkin_closed_at,opening_hours"
+)
 
 
 async def _sign_icons(db: DBService, icons: list[str | None]) -> dict[str, str]:
-    """Icons are private Storage paths: the app gets short-lived signed URLs."""
+    """Icons are private Storage paths: the app gets short-lived signed URLs.
+
+    Best-effort: a Storage failure must not fail a check-in already saved nor the
+    whole trophy shelf; the app falls back to the Flyer icon.
+    """
     paths = sorted({i for i in icons if i})
-    return await db.sign_media_paths(paths) if paths else {}
+    if not paths:
+        return {}
+    try:
+        return await db.sign_media_paths(paths)
+    except Exception:
+        logger.exception("Trophy icon signing failed (%d paths)", len(paths))
+        return {}
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -41,7 +60,7 @@ async def check_in_trophy(
     auth: Annotated[tuple[str, str], Depends(get_current_user_with_token)],
 ) -> TrophyRead:
     user_id, jwt = auth
-    event = await db.get_event_by_id(body.event_id, jwt)
+    event = await db.get_event_by_id(body.event_id, jwt, select=_CHECKIN_COLUMNS)
     if not event or event.get("lat") is None or event.get("long") is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found.")
     distance = haversine_meters(body.lat, body.long, float(event["lat"]), float(event["long"]))
@@ -50,19 +69,28 @@ async def check_in_trophy(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Too far from event location.",
         )
+    # Only while check-in is open (decisions 2026-10-12): otherwise one visit to the
+    # venue of a recurring event would collect the trophy of every date.
+    state = checkin_state(event, datetime.now(timezone.utc))
+    if state.status != "open":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=refusal_detail(state, is_place=event.get("kind") == "place"),
+        )
 
     # Every event gives a trophy (decision 2026-10-12): without a custom one, the
     # default is created on the first check-in.
-    template_id = await db.get_trophy_template_by_event(body.event_id)
-    if not template_id:
-        template_id = await db.ensure_default_trophy_template(
+    template = await db.get_trophy_template_by_event(body.event_id)
+    if not template:
+        template = await db.ensure_default_trophy_template(
             body.event_id, default_trophy_name(str(event.get("title") or "evento"))
         )
-    if not template_id:
+    if not template:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Não foi possível preparar o troféu deste evento.",
         )
+    template_id = str(template["id"])
 
     try:
         trophy_row = await db.insert_trophy(user_id, template_id, jwt)
@@ -72,18 +100,15 @@ async def check_in_trophy(
             detail="Troféu já resgatado.",
         ) from None
 
-    template = await db.get_trophy_template_full(template_id)
-    name = str(template.get("name", "")) if template else ""
-    description = template.get("description") if template else None
-    icon_url = template.get("icon_url") if template else None
-    if icon_url:
-        icon_url = (await _sign_icons(db, [icon_url])).get(icon_url, icon_url)
+    icon = template.get("icon_url")
+    # A path that could not be signed is never sent: it is private and useless to the app.
+    icon_url = (await _sign_icons(db, [icon])).get(icon) if icon else None
 
     return TrophyRead(
         id=str(trophy_row.get("id", "")),
         template_id=template_id,
-        name=name,
-        description=description,
+        name=str(template.get("name") or ""),
+        description=template.get("description"),
         icon_url=icon_url,
         acquired_at=_parse_dt(trophy_row.get("acquired_at")),
     )
@@ -115,7 +140,7 @@ async def list_user_trophies(
                 template_id=str(row.get("template_id", "")),
                 name=str(tpl.get("name", "")),
                 description=tpl.get("description"),
-                icon_url=signed.get(icon, icon) if icon else None,
+                icon_url=signed.get(icon) if icon else None,
                 acquired_at=_parse_dt(row.get("acquired_at")),
             )
         )

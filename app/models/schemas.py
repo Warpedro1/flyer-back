@@ -4,9 +4,11 @@ import re
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Literal, get_args
+from typing import Any, Literal, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.core.tz import to_local_naive
 
 EMBEDDING_DIMENSIONS = 1536
 
@@ -41,6 +43,9 @@ EVENT_CATEGORIES: tuple[str, ...] = get_args(EventCategory)
 
 # `event` has a date (or was created in the app); `place` is somewhere permanent to go.
 EventKind = Literal["event", "place"]
+
+# Whether check-in is possible right now (app/services/checkin_window.py).
+CheckinStatus = Literal["open", "not_yet", "closed", "no_schedule"]
 
 
 class ChatSender(str, Enum):
@@ -141,6 +146,12 @@ class EventRead(BaseModel):
     lat: float = Field(ge=-90.0, le=90.0)
     long: float = Field(ge=-180.0, le=180.0)
     event_date: datetime | None = None
+    # Check-in window (events): opens at `checkin_opens_at`, closes at `checkin_closes_at`
+    # (the end, or earlier if the creator closed it). See app/services/checkin_window.py.
+    ends_at: datetime | None = None
+    checkin_opens_at: datetime | None = None
+    checkin_closes_at: datetime | None = None
+    checkin_status: CheckinStatus | None = None
     price: Decimal | None = None
     rating: Decimal | None = None
     attendee_count: int = Field(default=0, ge=0)
@@ -423,9 +434,24 @@ class TrophyCustomization(BaseModel):
     # Path of an image the creator uploaded to the event-media bucket ({user_id}/...).
     icon_url: str | None = Field(default=None, min_length=1, max_length=500)
 
+    @field_validator("name", "description", mode="before")
+    @classmethod
+    def _blank_is_default(cls, v: Any) -> Any:
+        # "   " from a client that does not trim would replace the default name.
+        if isinstance(v, str):
+            v = v.strip()
+            return v or None
+        return v
 
-class EventCreate(BaseModel):
-    """Payload for creating a new event."""
+
+class _EventFields(BaseModel):
+    """What the creator sets on an event, both when creating and when editing.
+
+    Start and end are required (decision 2026-10-12): check-in opens at
+    `checkin_opens_at` (the start by default) and closes at the end. Times without a
+    timezone are Recife time, which is what the app's date pickers send; they are kept
+    as naive Recife wall-clock times here and stored with the -03:00 offset.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -435,19 +461,91 @@ class EventCreate(BaseModel):
     location_name: str | None = Field(default=None, max_length=200)
     lat: float = Field(ge=-90.0, le=90.0)
     long: float = Field(ge=-180.0, le=180.0)
-    event_date: datetime | None = None
+    event_date: datetime
+    ends_at: datetime
+    # None = when the event starts.
+    checkin_opens_at: datetime | None = None
     price: Decimal | None = Field(default=None, ge=0)
     # The place (kind = place) where this event happens, chosen by the creator.
     place_id: str | None = Field(default=None, min_length=1, max_length=64)
     # The trophy for checking in; None = the default trophy, created at first check-in.
     trophy: TrophyCustomization | None = None
     media: list[EventMediaCreate] = Field(default_factory=list, max_length=10)
-    recurrence: EventRecurrence | None = None
     # None = no limit: everybody joins as `confirmed` and the waitlist is never used.
     capacity: int | None = Field(default=None, gt=0)
     waitlist_enabled: bool = True
     call_ttl_minutes: int = Field(default=10, ge=1, le=240)
     auto_call_next: bool = True
+
+    @field_validator("event_date", "ends_at", "checkin_opens_at")
+    @classmethod
+    def _recife_wall_clock(cls, v: datetime | None) -> datetime | None:
+        return to_local_naive(v) if v is not None else None
+
+    @model_validator(mode="after")
+    def _window_in_order(self) -> Self:
+        if self.ends_at <= self.event_date:
+            raise ValueError("O fim tem de ser depois do início.")
+        if self.checkin_opens_at is not None and self.checkin_opens_at >= self.ends_at:
+            raise ValueError("O check-in tem de abrir antes do fim do evento.")
+        return self
+
+
+class EventCreate(_EventFields):
+    """Payload for creating a new event (one row per occurrence when recurring)."""
+
+    recurrence: EventRecurrence | None = None
+
+
+class EventUpdate(_EventFields):
+    """Payload for editing one event (one date of a series): no recurrence."""
+
+
+class EventMediaEdit(BaseModel):
+    """A media item in the edit form: the stored path plus a signed preview."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    media_url: str
+    type: MediaType
+    order_index: int = 0
+    preview_url: str | None = None
+
+
+class TrophyEditRead(BaseModel):
+    """The event's trophy in the edit form: the icon path plus a signed preview."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    description: str | None = None
+    icon_url: str | None = None
+    icon_preview_url: str | None = None
+
+
+class EventEditRead(BaseModel):
+    """What the edit form needs: stored values and Storage paths (creator only)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    title: str
+    description: str | None = None
+    category: str | None = None
+    place_id: str | None = None
+    location_name: str | None = None
+    lat: float
+    long: float
+    event_date: datetime | None = None
+    ends_at: datetime | None = None
+    checkin_opens_at: datetime | None = None
+    price: Decimal | None = None
+    capacity: int | None = None
+    waitlist_enabled: bool = True
+    call_ttl_minutes: int = 10
+    auto_call_next: bool = True
+    media: list[EventMediaEdit] = Field(default_factory=list)
+    trophy: TrophyEditRead | None = None
 
 
 class RsvpRead(BaseModel):

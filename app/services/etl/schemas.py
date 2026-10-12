@@ -29,6 +29,9 @@ class StandardizedEvent(BaseModel):
     lat: float = Field(ge=-90.0, le=90.0)
     long: float = Field(ge=-180.0, le=180.0)
     event_date: datetime | None = None
+    # Events: check-in opens at the start and closes at the end (decision 2026-10-12).
+    ends_at: datetime | None = None
+    checkin_opens_at: datetime | None = None
     # Events: exact price in BRL (0 = free, None = unknown). Places: price_level.
     price: Decimal | None = Field(default=None, ge=0)
     price_level: int | None = Field(default=None, ge=1, le=4)

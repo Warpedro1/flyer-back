@@ -493,11 +493,21 @@ class DBService:
         )
         await self._raise_for_supabase(r)
 
-    async def ensure_default_trophy_template(self, event_id: str, name: str) -> str | None:
+    async def upsert_trophy_template(self, row: dict[str, Any]) -> None:
+        """Create or replace the trophy of one event (`event_id` is unique)."""
+        r = await self._client.post(
+            f"{REST_PREFIX}/trophy_templates",
+            params={"on_conflict": "event_id"},
+            json=row,
+            headers={**self._admin_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
+        )
+        await self._raise_for_supabase(r)
+
+    async def ensure_default_trophy_template(self, event_id: str, name: str) -> dict[str, Any] | None:
         """The event's trophy template, creating the default one if it has none.
 
         Safe when two people check in at once: `event_id` is unique, the second
-        insert is ignored and the id is read back.
+        insert is ignored and the row is read back.
         """
         r = await self._client.post(
             f"{REST_PREFIX}/trophy_templates",
@@ -508,22 +518,21 @@ class DBService:
         await self._raise_for_supabase(r)
         return await self.get_trophy_template_by_event(event_id)
 
-    async def get_trophy_template_by_event(self, event_id: str) -> str | None:
+    async def get_trophy_template_by_event(self, event_id: str) -> dict[str, Any] | None:
+        """The event's trophy (id, name, description, icon path), or None."""
         r = await self._client.get(
             f"{REST_PREFIX}/trophy_templates",
             params={
                 "event_id": f"eq.{event_id}",
-                "select": "id",
+                "select": "id,name,description,icon_url",
                 "limit": "1",
             },
             headers=self._admin_headers(),
         )
         await self._raise_for_supabase(r)
         rows = r.json()
-        if isinstance(rows, list) and rows:
-            tid = rows[0].get("id")
-            if tid:
-                return str(tid)
+        if isinstance(rows, list) and rows and rows[0].get("id"):
+            return dict(rows[0])
         return None
 
     async def insert_trophy(self, user_id: str, template_id: str, jwt: str) -> dict[str, Any]:
@@ -696,18 +705,6 @@ class DBService:
             }
             for pid in ids
         ]
-
-    async def get_trophy_template_full(self, template_id: str) -> dict[str, Any] | None:
-        r = await self._client.get(
-            f"{REST_PREFIX}/trophy_templates",
-            params={"id": f"eq.{template_id}", "select": "*"},
-            headers=self._admin_headers(),
-        )
-        await self._raise_for_supabase(r)
-        rows = r.json()
-        if isinstance(rows, list) and rows:
-            return rows[0]
-        return None
 
     async def batch_fetch_events_by_ids(
         self,
@@ -902,6 +899,65 @@ class DBService:
         )
         await self._raise_for_supabase(r)
 
+    async def update_event(
+        self, event_id: str, creator_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Update one event the user created; returns the new row (None if not theirs)."""
+        r = await self._client.patch(
+            f"{REST_PREFIX}/events",
+            params={"id": f"eq.{event_id}", "creator_id": f"eq.{creator_id}"},
+            json=payload,
+            headers={**self._admin_headers(), "Prefer": "return=representation"},
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        if isinstance(rows, list) and rows:
+            return dict(rows[0])
+        return None
+
+    async def delete_events(self, event_ids: list[str], creator_id: str) -> None:
+        """Delete events the user created (media, trophies and RSVPs go by cascade)."""
+        if not event_ids:
+            return
+        r = await self._client.delete(
+            f"{REST_PREFIX}/events",
+            params={"id": f"in.({','.join(event_ids)})", "creator_id": f"eq.{creator_id}"},
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+
+    async def get_event_media_rows(self, event_id: str) -> list[dict[str, Any]]:
+        """Stored media of one event, with the raw Storage paths (for the edit form)."""
+        r = await self._client.get(
+            f"{REST_PREFIX}/event_media",
+            params={
+                "event_id": f"eq.{event_id}",
+                "select": "media_url,type,order_index",
+                "order": "order_index.asc",
+            },
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        return [dict(row) for row in rows] if isinstance(rows, list) else []
+
+    async def replace_event_media(self, event_id: str, rows: list[dict[str, Any]]) -> None:
+        """Replace the media of one event with ``rows`` (each carries the event_id)."""
+        r = await self._client.delete(
+            f"{REST_PREFIX}/event_media",
+            params={"event_id": f"eq.{event_id}"},
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+        if not rows:
+            return
+        r = await self._client.post(
+            f"{REST_PREFIX}/event_media",
+            json=rows,
+            headers={**self._admin_headers(), "Prefer": "return=minimal"},
+        )
+        await self._raise_for_supabase(r)
+
     async def set_events_embedding(self, event_ids: list[str], vector: list[float]) -> None:
         """Set the same interest embedding on the given events (for vector discovery)."""
         if not event_ids:
@@ -919,11 +975,13 @@ class DBService:
         self,
         event_id: str,
         jwt: str,
+        *,
+        select: str = "*",
     ) -> dict[str, Any] | None:
-        """Return a single event row or None."""
+        """Return a single event row or None (only the ``select`` columns)."""
         r = await self._client.get(
             f"{REST_PREFIX}/events",
-            params={"id": f"eq.{event_id}", "select": "*", "limit": "1"},
+            params={"id": f"eq.{event_id}", "select": select, "limit": "1"},
             headers=self._user_headers(jwt),
         )
         await self._raise_for_supabase(r)
