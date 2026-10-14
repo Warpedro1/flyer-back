@@ -18,7 +18,7 @@ bearer_scheme = HTTPBearer(auto_error=True)
 EMAIL_CODE_REQUIRED = "email_code_required"
 # `detail` the app recognises to send the user to "complete your sign-up" (CPF, phone).
 PROFILE_INCOMPLETE = "profile_incomplete"
-# `detail` for a sign-up whose code was not entered in the tab that signed up
+# `detail` for a sign-up whose code was not entered in the browser that signed up
 # (decision 2026-10-14): the app sends the user to the sign-up code screen.
 SIGNUP_PENDING = "signup_pending"
 
@@ -84,7 +84,7 @@ async def _authenticated_payload(
 
     1. A password session only reaches the API after the 6-digit code sent to the
        account's e-mail.
-    2. A sign-up by e-mail only counts once its code was entered in the tab that
+    2. A sign-up by e-mail only counts once its code was entered in the browser that
        signed up (ticket, decision 2026-10-14): a Supabase session opened with the
        code alone, by whoever got the e-mail by mistake, stays out.
     3. Every account needs CPF and phone (Google ones complete them on first access).
