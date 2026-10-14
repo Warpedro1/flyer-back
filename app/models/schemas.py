@@ -713,12 +713,28 @@ class ProfileIdentityIn(BaseModel):
         return _valid_phone(v)
 
 
+class SignupOut(BaseModel):
+    """The ticket that ties the sign-up code to the tab that signed up (2026-10-14)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ticket: str
+
+
+class SignupActivateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ticket: str = Field(min_length=20, max_length=200)
+
+
 class ProfileIdentityStatus(BaseModel):
-    """Whether the account has CPF and phone; the owner's own, masked."""
+    """Whether the account has CPF and phone (the owner's own, masked) and whether its
+    sign-up still waits for the code."""
 
     model_config = ConfigDict(extra="forbid")
 
     complete: bool
+    pending: bool = False
     cpf_masked: str | None = None
     phone_masked: str | None = None
 
