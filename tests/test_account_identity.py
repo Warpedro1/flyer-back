@@ -49,10 +49,13 @@ def db() -> Iterator[MagicMock]:
     fake = MagicMock()
     fake.get_events_by_creator = AsyncMock(return_value=[])
     fake.is_session_verified = AsyncMock(return_value=True)
-    fake.is_profile_complete = AsyncMock(return_value=False)
+    fake.get_account_state = AsyncMock(return_value="incomplete")
     fake.get_profile_identity = AsyncMock(return_value={"cpf": None, "phone": None})
     fake.find_identity_conflicts = AsyncMock(return_value=set())
-    fake.signup_user = AsyncMock()
+    fake.find_pending_signups = AsyncMock(return_value=[])
+    fake.delete_auth_user = AsyncMock()
+    fake.signup_user = AsyncMock(return_value="user-9")
+    fake.create_signup_ticket = AsyncMock()
     fake.complete_profile_identity = AsyncMock(return_value=True)
     app.dependency_overrides[get_db_service] = lambda: fake
     with patch("app.api.deps.DBService", return_value=fake):
@@ -72,12 +75,18 @@ def test_sign_up_creates_the_account_with_cpf_and_phone(db: MagicMock) -> None:
 
     assert response.status_code == 201
     db.find_identity_conflicts.assert_awaited_once_with(
-        email="ana@example.com", cpf="52998224725", phone="+5581912345678"
+        email="ana@example.com", cpf="52998224725", phone="+5581912345678", active_only=True
     )
     db.signup_user.assert_awaited_once_with(
         email="ana@example.com",
         password="frevo2026",
-        data={"name": "Ana Lima", "full_name": "Ana Lima", "cpf": "52998224725", "phone": "+5581912345678"},
+        data={
+            "name": "Ana Lima",
+            "full_name": "Ana Lima",
+            "cpf": "52998224725",
+            "phone": "+5581912345678",
+            "flyer_signup": True,
+        },
     )
 
 
@@ -150,14 +159,14 @@ def test_an_account_without_cpf_and_phone_cannot_use_the_app(db: MagicMock) -> N
 
 
 def test_a_complete_account_passes_and_is_remembered(db: MagicMock) -> None:
-    db.is_profile_complete.return_value = True
+    db.get_account_state.return_value = "ok"
     client = TestClient(app)
 
     with _as(_payload("oauth")):
         assert client.get("/events/mine", headers=AUTH).status_code == 200
         assert client.get("/events/mine", headers=AUTH).status_code == 200
 
-    assert db.is_profile_complete.await_count == 1
+    assert db.get_account_state.await_count == 1
 
 
 def test_the_email_code_comes_before_the_profile(db: MagicMock) -> None:
@@ -175,14 +184,19 @@ def test_status_shows_the_owner_masked_data(db: MagicMock) -> None:
     with _as(_payload()):
         body = TestClient(app).get("/auth/profile/status", headers=AUTH).json()
 
-    assert body == {"complete": True, "cpf_masked": "***.982.247-**", "phone_masked": "(81) 9****-5678"}
+    assert body == {
+        "complete": True,
+        "pending": False,
+        "cpf_masked": "***.982.247-**",
+        "phone_masked": "(81) 9****-5678",
+    }
 
 
 def test_status_of_an_incomplete_account(db: MagicMock) -> None:
     with _as(_payload()):
         body = TestClient(app).get("/auth/profile/status", headers=AUTH).json()
 
-    assert body == {"complete": False, "cpf_masked": None, "phone_masked": None}
+    assert body == {"complete": False, "pending": False, "cpf_masked": None, "phone_masked": None}
 
 
 def test_completing_the_profile(db: MagicMock) -> None:
@@ -193,7 +207,7 @@ def test_completing_the_profile(db: MagicMock) -> None:
 
     assert response.status_code == 204
     db.find_identity_conflicts.assert_awaited_once_with(
-        email=None, cpf="52998224725", phone="+5581912345678", exclude_user_id="user-1"
+        email=None, cpf="52998224725", phone="+5581912345678", exclude_user_id="user-1", active_only=True
     )
     db.complete_profile_identity.assert_awaited_once_with("user-1", "52998224725", "+5581912345678")
 
@@ -239,14 +253,15 @@ def test_completing_needs_the_email_code_first(db: MagicMock) -> None:
 
 async def test_signup_goes_to_supabase_with_the_metadata() -> None:
     client = MagicMock()
-    client.post = AsyncMock(return_value=httpx.Response(200, json={}, request=httpx.Request("POST", "http://x")))
+    client.post = AsyncMock(
+        return_value=httpx.Response(200, json={"id": "user-9"}, request=httpx.Request("POST", "http://x"))
+    )
 
     await DBService(client).signup_user(email="ana@example.com", password="frevo2026", data={"cpf": "1"})
 
     args, kwargs = client.post.await_args
     assert args[0] == "/auth/v1/signup"
     assert kwargs["json"] == {"email": "ana@example.com", "password": "frevo2026", "data": {"cpf": "1"}}
-    assert kwargs["params"]["redirect_to"].endswith("/")
 
 
 async def test_conflicts_look_at_cpf_phone_and_email() -> None:

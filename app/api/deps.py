@@ -18,6 +18,9 @@ bearer_scheme = HTTPBearer(auto_error=True)
 EMAIL_CODE_REQUIRED = "email_code_required"
 # `detail` the app recognises to send the user to "complete your sign-up" (CPF, phone).
 PROFILE_INCOMPLETE = "profile_incomplete"
+# `detail` for a sign-up whose code was not entered in the tab that signed up
+# (decision 2026-10-14): the app sends the user to the sign-up code screen.
+SIGNUP_PENDING = "signup_pending"
 
 # Sessions that already verified the e-mail code, so a password session does not cost
 # a database round trip per request. Per instance and bounded: a miss only means one
@@ -26,7 +29,8 @@ _VERIFIED_CACHE_SIZE = 10_000
 _verified_sessions: "OrderedDict[str, None]" = OrderedDict()
 
 
-# Accounts that already have CPF and phone (never removed: CPF cannot be unset).
+# Active accounts with CPF and phone (never removed: CPF cannot be unset and an
+# activated sign-up does not go back to pending).
 _complete_profiles: "OrderedDict[str, None]" = OrderedDict()
 
 
@@ -62,14 +66,15 @@ async def _session_verified(request: Request, session_id: str) -> bool:
     return verified
 
 
-async def _profile_complete(request: Request, user_id: str) -> bool:
+async def _account_state(request: Request, user_id: str) -> str:
+    """`ok`, `incomplete` (no CPF/phone) or `pending` (sign-up without its code)."""
     if user_id in _complete_profiles:
-        return True
+        return "ok"
     client = getattr(request.app.state, "http_client", None)
-    complete = await DBService(client).is_profile_complete(user_id)
-    if complete:
+    state = await DBService(client).get_account_state(user_id)
+    if state == "ok":
         remember_complete_profile(user_id)
-    return complete
+    return state
 
 
 async def _authenticated_payload(
@@ -79,7 +84,10 @@ async def _authenticated_payload(
 
     1. A password session only reaches the API after the 6-digit code sent to the
        account's e-mail.
-    2. Every account needs CPF and phone (Google ones complete them on first access).
+    2. A sign-up by e-mail only counts once its code was entered in the tab that
+       signed up (ticket, decision 2026-10-14): a Supabase session opened with the
+       code alone, by whoever got the e-mail by mistake, stays out.
+    3. Every account needs CPF and phone (Google ones complete them on first access).
 
     Enforced here and not in the app: whoever has a token can call the API directly
     and skip any screen.
@@ -89,8 +97,12 @@ async def _authenticated_payload(
         session_id = payload.get("session_id")
         if not isinstance(session_id, str) or not await _session_verified(request, session_id):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=EMAIL_CODE_REQUIRED)
-    if require_profile and not await _profile_complete(request, payload["sub"]):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=PROFILE_INCOMPLETE)
+    if require_profile:
+        state = await _account_state(request, payload["sub"])
+        if state == "pending":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=SIGNUP_PENDING)
+        if state != "ok":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=PROFILE_INCOMPLETE)
     return payload
 
 
@@ -147,9 +159,10 @@ async def get_current_user_pending_profile(
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
 ) -> str:
-    """Authenticate (with the e-mail code) without requiring CPF and phone.
+    """Authenticate (with the e-mail code) without the account checks.
 
-    Only for the `/auth/profile/*` routes, which exist to complete them
+    Skips CPF/phone and the pending sign-up. Only for the `/auth/profile/*` routes,
+    which exist to complete them, and `POST /auth/signup/activate`
     (`tests/test_route_auth.py` refuses it anywhere else).
     """
     payload = await _authenticated_payload(request, credentials.credentials, require_profile=False)
