@@ -1,13 +1,13 @@
-"""Sign-up confirmed by code, tied to the tab that asked for it (decision 2026-10-14).
+"""Sign-up confirmed by code, tied to the browser that asked for it (decisions 2026-10-14).
 
 * The sign-up e-mail carries only a 6-digit code, no link.
 * The code only counts in the session that signed up: `POST /auth/signup` answers a
-  secret ticket that stays in that tab, and the account stays *pending* until
+  secret ticket that stays in that browser, and the account stays *pending* until
   `POST /auth/signup/activate` presents it. Supabase codes can be redeemed directly
   with the publishable key, so whoever receives the e-mail by mistake (a mistyped
   address) gets a Supabase session but no access to the Flyer API.
 * A new sign-up that only clashes with pending accounts replaces them (wrong e-mail,
-  closed tab, lost code); a clash with an active account is still a 409.
+  another device, lost code); a clash with an active account is still a 409.
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ def test_only_active_accounts_block_a_sign_up(db: MagicMock) -> None:
 
 
 def test_a_new_sign_up_replaces_pending_ones(db: MagicMock) -> None:
-    # Wrong e-mail, a closed tab or a lost code: signing up again starts over.
+    # Wrong e-mail, another device or a lost code: signing up again starts over.
     db.find_pending_signups.return_value = ["old-1", "old-2"]
 
     response = TestClient(app).post("/auth/signup", json=SIGNUP)
@@ -181,7 +181,7 @@ def test_status_tells_the_app_the_sign_up_is_pending(db: MagicMock) -> None:
 # ---------------------------------------------------------------- activate --
 
 
-def test_activating_with_the_ticket_of_this_tab(db: MagicMock) -> None:
+def test_activating_with_the_ticket_of_this_browser(db: MagicMock) -> None:
     with _as(_payload()):
         response = TestClient(app).post("/auth/signup/activate", headers=AUTH, json={"ticket": "t" * 43})
 
@@ -199,7 +199,7 @@ def test_after_activating_the_app_opens(db: MagicMock) -> None:
 
 
 def test_a_wrong_ticket_does_not_activate(db: MagicMock) -> None:
-    # Another tab, another browser, or another account's ticket.
+    # Another browser or device, or another account's ticket.
     db.consume_signup_ticket.return_value = False
 
     with _as(_payload()):

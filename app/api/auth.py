@@ -2,8 +2,8 @@
 
 * Sign-up: name, e-mail, CPF, mobile and password; CPF, mobile and e-mail are unique.
   Public route (there is no account yet), rate limited per client. The e-mail carries
-  a 6-digit code, no link, and the code only counts in the tab that signed up
-  (decision 2026-10-14): that tab gets a secret ticket, and the account stays pending
+  a 6-digit code, no link, and the code only counts in the browser that signed up
+  (decisions 2026-10-14): that browser gets a secret ticket, and the account stays pending
   until `/auth/signup/activate` presents it.
 * Second factor: a session opened with a password must verify the 6-digit code that
   Supabase Auth e-mails to the account before using the API. The address always comes
@@ -72,7 +72,7 @@ async def _claim_identity(
     db: DbServiceDep, *, email: str | None, cpf: str, phone: str, exclude_user_id: str | None = None
 ) -> None:
     """409 if an active account has them; sign-ups still waiting for their code give
-    way (wrong e-mail, closed tab, lost code) and are deleted."""
+    way (wrong e-mail, another device, lost code) and are deleted."""
     conflict_args: dict[str, str] = {"exclude_user_id": exclude_user_id} if exclude_user_id else {}
     taken = await db.find_identity_conflicts(
         email=email, cpf=cpf, phone=phone, **conflict_args, active_only=True
@@ -92,7 +92,7 @@ async def _claim_identity(
 async def signup(request: Request, body: SignupIn, db: DbServiceDep) -> SignupOut:
     """Create a pending account; Supabase e-mails the 6-digit code.
 
-    Answers the ticket the tab must present with the code (`/auth/signup/activate`).
+    Answers the ticket the browser must present with the code (`/auth/signup/activate`).
     Only its hash is stored.
     """
     await _claim_identity(db, email=body.email, cpf=body.cpf, phone=body.phone)
@@ -137,12 +137,12 @@ async def signup(request: Request, body: SignupIn, db: DbServiceDep) -> SignupOu
 async def activate_signup(
     request: Request, body: SignupActivateIn, user_id: PendingProfileDep, db: DbServiceDep
 ) -> Response:
-    """Finish a sign-up: the session opened with the code plus the ticket of the tab
+    """Finish a sign-up: the session opened with the code plus the ticket of the browser
     that signed up. The code alone (whoever got the e-mail by mistake) is not enough."""
     if not await db.consume_signup_ticket(user_id, _ticket_hash(body.ticket)):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Este código não foi pedido aqui. Abre-o no separador onde fizeste o cadastro, "
+            detail="Este código não foi pedido aqui. Abre-o no navegador onde fizeste o cadastro, "
             "ou faz o cadastro outra vez.",
         )
     await db.activate_signup(user_id)
