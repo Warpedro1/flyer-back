@@ -10,9 +10,10 @@ a configuração de Auth: isto é feito no painel.
 | Reset Password | `reset_password.html` | Criar uma senha nova no Flyer |
 
 O cadastro e o login com senha usam **códigos** de 6 dígitos (`{{ .Token }}`), sem links:
-- **Confirm signup** (decisão 2026-10-14): o código só ativa a conta no separador que fez
-  o cadastro, que guarda o bilhete devolvido por `POST /auth/signup`
-  (`POST /auth/signup/activate`, `app/api/auth.py`).
+- **Confirm signup** (decisões 2026-10-14): o código só ativa a conta no navegador que fez
+  o cadastro (qualquer separador), que guarda o bilhete devolvido por `POST /auth/signup`
+  (`POST /auth/signup/activate`, `app/api/auth.py`). O modelo não pode ter
+  `{{ .ConfirmationURL }}`: só `{{ .Token }}`.
 - **Magic Link**: o código do login com senha, pedido pelo backend em `POST /auth/v1/otp`.
 
 Configuração que acompanha estes modelos (decisões 2026-10-12):

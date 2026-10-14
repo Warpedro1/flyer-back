@@ -714,7 +714,7 @@ class ProfileIdentityIn(BaseModel):
 
 
 class SignupOut(BaseModel):
-    """The ticket that ties the sign-up code to the tab that signed up (2026-10-14)."""
+    """The ticket that ties the sign-up code to the browser that signed up (2026-10-14)."""
 
     model_config = ConfigDict(extra="forbid")
 

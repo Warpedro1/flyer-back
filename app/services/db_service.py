@@ -227,7 +227,7 @@ class DBService:
             return
         await self._raise_for_supabase(r)
 
-    # ---------------------------------------- sign-up tied to its tab (ticket) --
+    # ------------------------------------ sign-up tied to its browser (ticket) --
 
     async def create_signup_ticket(self, user_id: str, ticket_hash: str) -> None:
         r = await self._client.post(
