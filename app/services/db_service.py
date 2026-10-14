@@ -197,19 +197,75 @@ class DBService:
 
     # ------------------------------------------------ account: CPF and phone --
 
-    async def signup_user(self, *, email: str, password: str, data: dict[str, Any]) -> None:
-        """Create the account in Supabase Auth; it e-mails the confirmation link.
+    async def signup_user(self, *, email: str, password: str, data: dict[str, Any]) -> str:
+        """Create the account in Supabase Auth and return its id.
 
-        The profile trigger copies `data` (name, cpf, phone) into `profiles`, whose
-        unique indexes reject a repeated CPF or phone even under a race.
+        Supabase e-mails the 6-digit confirmation code (template "Confirm signup", no
+        link: decision 2026-10-14). The profile trigger copies `data` (name, cpf, phone,
+        `flyer_signup`) into `profiles`, whose unique indexes reject a repeated CPF or
+        phone even under a race, and creates the profile as pending.
         """
         r = await self._client.post(
             f"{AUTH_PREFIX}/signup",
-            params={"redirect_to": f"{settings.APP_URL.rstrip('/')}/"},
             json={"email": email, "password": password, "data": data},
             headers=self._admin_headers(),
         )
         await self._raise_for_supabase(r)
+        body = r.json() if r.content else {}
+        user = body.get("user") if isinstance(body.get("user"), dict) else body
+        user_id = user.get("id") if isinstance(user, dict) else None
+        if not isinstance(user_id, str) or not user_id:
+            raise RuntimeError("Supabase sign-up answered without a user id")
+        return user_id
+
+    async def delete_auth_user(self, user_id: str) -> None:
+        """Delete an account in Supabase Auth (its profile and ticket go with it)."""
+        r = await self._client.delete(
+            f"{AUTH_PREFIX}/admin/users/{user_id}", headers=self._admin_headers()
+        )
+        if r.status_code == 404:
+            return
+        await self._raise_for_supabase(r)
+
+    # ---------------------------------------- sign-up tied to its tab (ticket) --
+
+    async def create_signup_ticket(self, user_id: str, ticket_hash: str) -> None:
+        r = await self._client.post(
+            f"{REST_PREFIX}/signup_tickets",
+            params={"on_conflict": "user_id"},
+            json={"user_id": user_id, "ticket_hash": ticket_hash},
+            headers={**self._admin_headers(), "Prefer": "resolution=merge-duplicates,return=minimal"},
+        )
+        await self._raise_for_supabase(r)
+
+    async def consume_signup_ticket(self, user_id: str, ticket_hash: str) -> bool:
+        """Delete the ticket if it matches this account. True when it did."""
+        r = await self._client.delete(
+            f"{REST_PREFIX}/signup_tickets",
+            params={"user_id": f"eq.{user_id}", "ticket_hash": f"eq.{ticket_hash}"},
+            headers={**self._admin_headers(), "Prefer": "return=representation"},
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        return isinstance(rows, list) and bool(rows)
+
+    async def activate_signup(self, user_id: str) -> None:
+        r = await self._client.patch(
+            f"{REST_PREFIX}/profiles",
+            params={"id": f"eq.{user_id}"},
+            json={"signup_pending": False},
+            headers={**self._admin_headers(), "Prefer": "return=minimal"},
+        )
+        await self._raise_for_supabase(r)
+
+    # ------------------------------------------------ account: CPF and phone --
+
+    @staticmethod
+    def _identity_filter(email: str | None, cpf: str, phone: str) -> str:
+        filters = [f"cpf.eq.{cpf}", f"phone.eq.{phone}"]
+        if email:
+            filters.append(f"email.eq.{email}")
+        return f"({','.join(filters)})"
 
     async def find_identity_conflicts(
         self,
@@ -218,14 +274,22 @@ class DBService:
         cpf: str,
         phone: str,
         exclude_user_id: str | None = None,
+        active_only: bool = False,
     ) -> set[str]:
-        """Which of e-mail, CPF and phone already belong to another account."""
-        filters = [f"cpf.eq.{cpf}", f"phone.eq.{phone}"]
-        if email:
-            filters.append(f"email.eq.{email}")
-        params = {"select": "id,cpf,phone,email", "or": f"({','.join(filters)})", "limit": "10"}
+        """Which of e-mail, CPF and phone already belong to another account.
+
+        `active_only` leaves out sign-ups still waiting for their code, which a new
+        sign-up replaces (`find_pending_signups`).
+        """
+        params = {
+            "select": "id,cpf,phone,email",
+            "or": self._identity_filter(email, cpf, phone),
+            "limit": "10",
+        }
         if exclude_user_id:
             params["id"] = f"neq.{exclude_user_id}"
+        if active_only:
+            params["signup_pending"] = "is.false"
         r = await self._client.get(
             f"{REST_PREFIX}/profiles", params=params, headers=self._admin_headers()
         )
@@ -241,20 +305,44 @@ class DBService:
                 taken.add("email")
         return taken
 
-    async def get_profile_identity(self, user_id: str) -> dict[str, Any]:
-        """The owner's own CPF and phone (never returned for anyone else)."""
+    async def find_pending_signups(self, *, email: str | None, cpf: str, phone: str) -> list[str]:
+        """Ids of sign-ups still waiting for their code that use this e-mail, CPF or phone."""
         r = await self._client.get(
             f"{REST_PREFIX}/profiles",
-            params={"id": f"eq.{user_id}", "select": "cpf,phone", "limit": "1"},
+            params={
+                "select": "id",
+                "or": self._identity_filter(email, cpf, phone),
+                "signup_pending": "is.true",
+                "limit": "10",
+            },
             headers=self._admin_headers(),
         )
         await self._raise_for_supabase(r)
         rows = r.json()
-        return dict(rows[0]) if isinstance(rows, list) and rows else {"cpf": None, "phone": None}
+        return [str(row["id"]) for row in rows if row.get("id")] if isinstance(rows, list) else []
 
-    async def is_profile_complete(self, user_id: str) -> bool:
+    async def get_profile_identity(self, user_id: str) -> dict[str, Any]:
+        """The owner's own CPF and phone (never returned for anyone else), and whether
+        the sign-up still waits for its code."""
+        r = await self._client.get(
+            f"{REST_PREFIX}/profiles",
+            params={"id": f"eq.{user_id}", "select": "cpf,phone,signup_pending", "limit": "1"},
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        if isinstance(rows, list) and rows:
+            return dict(rows[0])
+        return {"cpf": None, "phone": None, "signup_pending": False}
+
+    async def get_account_state(self, user_id: str) -> str:
+        """`pending` (sign-up without its code), `incomplete` (no CPF/phone) or `ok`."""
         identity = await self.get_profile_identity(user_id)
-        return bool(identity.get("cpf")) and bool(identity.get("phone"))
+        if identity.get("signup_pending"):
+            return "pending"
+        if not identity.get("cpf") or not identity.get("phone"):
+            return "incomplete"
+        return "ok"
 
     async def complete_profile_identity(self, user_id: str, cpf: str, phone: str) -> bool:
         """Set CPF and phone once. False when the account already had a CPF."""

@@ -29,6 +29,8 @@ AUTH_DEPENDENCIES: set[Callable[..., Any]] = {get_current_user, get_current_user
 EMAIL_CODE_PREFIX = "/auth/email-code/"
 # Completing CPF and phone runs before the profile is complete (but after the code).
 PROFILE_PREFIX = "/auth/profile/"
+# Activating a sign-up happens while the account is still pending (decision 2026-10-14).
+SIGNUP_ACTIVATE = ("POST", "/auth/signup/activate")
 
 # Reachable without a token, on purpose. Anything added here is public to the internet.
 PUBLIC_ROUTES: set[tuple[str, str]] = {
@@ -115,11 +117,12 @@ def test_route_requires_authentication(route: APIRoute, method: str, path: str) 
     assert get_current_user_pending_code not in calls, (
         f"{method} {path} skips the e-mail code: only {EMAIL_CODE_PREFIX}* may do that."
     )
-    if path.startswith(PROFILE_PREFIX):
+    if path.startswith(PROFILE_PREFIX) or (method, path) == SIGNUP_ACTIVATE:
         assert get_current_user_pending_profile in calls, f"{method} {path} must authenticate the token."
         return
     assert get_current_user_pending_profile not in calls, (
-        f"{method} {path} skips the CPF/phone check: only {PROFILE_PREFIX}* may do that."
+        f"{method} {path} skips the account checks (CPF/phone, pending sign-up): only "
+        f"{PROFILE_PREFIX}* and {' '.join(SIGNUP_ACTIVATE)} may do that."
     )
     assert AUTH_DEPENDENCIES & calls, (
         f"{method} {path} does not depend on get_current_user*. Add the dependency, "
