@@ -116,20 +116,24 @@ def _signals_to_document(qa: StepQA, sig: TasteSignals) -> Document:
 async def extract_tastes_per_step(qas: list[StepQA]) -> list[Document]:
     """Return one LangChain `Document` per step.
 
-    A per-step extraction failure degrades to the light `_short_document` for that
-    step rather than aborting the whole onboarding (the raw answer is still kept).
+    All steps run at once, each limited to ``TASTE_EXTRACT_TIMEOUT_SECONDS`` (#26:
+    the onboarding must fit a 60 s function). A step that fails or runs out of time
+    degrades to the light `_short_document` rather than aborting the whole
+    onboarding (the raw answer is still kept).
     """
-    sem = asyncio.Semaphore(4)
     out: list[Document | None] = [None] * len(qas)
+    timeout = settings.TASTE_EXTRACT_TIMEOUT_SECONDS
 
     async def one(idx: int, qa: StepQA) -> None:
         if len(qa.answer.strip()) < settings.ONBOARDING_ANSWER_ELABORATE_MIN_CHARS:
             out[idx] = _short_document(qa)
             return
         try:
-            async with sem:
-                sig = await _extract_elaborate(qa)
-                out[idx] = _signals_to_document(qa, sig)
+            sig = await asyncio.wait_for(_extract_elaborate(qa), timeout=timeout)
+            out[idx] = _signals_to_document(qa, sig)
+        except TimeoutError:
+            logger.warning("Taste extraction timed out for step %s; using short document.", qa.step_key)
+            out[idx] = _short_document(qa)
         except Exception:
             logger.exception("Taste extraction failed for step %s; using short document.", qa.step_key)
             out[idx] = _short_document(qa)

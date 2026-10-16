@@ -25,3 +25,6 @@ pusher>=3.3.0
 # Usados pelo guard de onboarding e pela extração de gostos.
 langchain-core>=0.3.0,<0.4
 langchain-openai>=0.2.0,<0.3
+# Traça todas as chamadas à OpenAI (wrap_openai, #25). Já vinha com o langchain-core;
+# fica explícito porque o app/services/ai_service.py o importa.
+langsmith>=0.3.45,<1.0.0
