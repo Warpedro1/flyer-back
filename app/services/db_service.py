@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.core.errors import session_invalid
 from app.models.schemas import ChatSender, EventMediaRead, FollowStatus, MediaType
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,17 @@ class DBService:
         if code == POSTGRES_UNIQUE_VIOLATION:
             raise UniqueViolationError from None
         response.raise_for_status()
+
+    # ---------------------------------------------------------- app errors --
+
+    async def record_app_error(self, row: dict[str, Any]) -> None:
+        """One row in `app_errors` (#25 phase 1). Use `services/error_log.py`."""
+        r = await self._client.post(
+            f"{REST_PREFIX}/app_errors",
+            json=row,
+            headers={**self._admin_headers(), "Prefer": "return=minimal"},
+        )
+        await self._raise_for_supabase(r)
 
     # ------------------------------------------------- login second factor --
 
@@ -356,8 +368,7 @@ class DBService:
         rows = r.json()
         return isinstance(rows, list) and bool(rows)
 
-    async def get_or_create_chat(self, user_id: str, jwt: str) -> str:
-        """Return the single ai_chats.id for this user (UNIQUE user_id)."""
+    async def _find_chat(self, user_id: str, jwt: str) -> str | None:
         r = await self._client.get(
             f"{REST_PREFIX}/ai_chats",
             params={"user_id": f"eq.{user_id}", "select": "id"},
@@ -365,10 +376,20 @@ class DBService:
         )
         await self._raise_for_supabase(r)
         rows = r.json()
-        if isinstance(rows, list) and rows:
-            row_id = rows[0].get("id")
-            if row_id:
-                return str(row_id)
+        if isinstance(rows, list) and rows and rows[0].get("id"):
+            return str(rows[0]["id"])
+        return None
+
+    async def get_or_create_chat(self, user_id: str, jwt: str) -> str:
+        """Return the single ai_chats.id for this user (UNIQUE user_id).
+
+        Two requests at once both miss the SELECT; the second INSERT answers 409 and
+        reads the chat the first one created (#30). A 409 with no chat to read is the
+        foreign key: the account was deleted while its session lived.
+        """
+        found = await self._find_chat(user_id, jwt)
+        if found:
+            return found
 
         ins = await self._client.post(
             f"{REST_PREFIX}/ai_chats",
@@ -378,6 +399,11 @@ class DBService:
                 "Prefer": "return=representation",
             },
         )
+        if ins.status_code == httpx.codes.CONFLICT:
+            found = await self._find_chat(user_id, jwt)
+            if found:
+                return found
+            raise session_invalid()
         await self._raise_for_supabase(ins)
         created = ins.json()
         if isinstance(created, list) and created:
@@ -812,7 +838,7 @@ class DBService:
         joined = ",".join(profile_ids)
         r = await self._client.get(
             f"{REST_PREFIX}/profiles",
-            params={"id": f"in.({joined})", "select": "id,name,email"},
+            params={"id": f"in.({joined})", "select": "id,name"},
             headers=self._user_headers(jwt),
         )
         await self._raise_for_supabase(r)
@@ -852,7 +878,6 @@ class DBService:
                     "status": row.get("status"),
                     "created_at": row.get("created_at"),
                     "follower_name": prof.get("name"),
-                    "follower_email": prof.get("email"),
                 }
             )
         return result
@@ -900,7 +925,6 @@ class DBService:
             {
                 "id": pid,
                 "name": profiles.get(pid, {}).get("name"),
-                "email": profiles.get(pid, {}).get("email"),
             }
             for pid in ids
         ]
@@ -925,7 +949,6 @@ class DBService:
             {
                 "id": pid,
                 "name": profiles.get(pid, {}).get("name"),
-                "email": profiles.get(pid, {}).get("email"),
             }
             for pid in ids
         ]
@@ -1413,7 +1436,7 @@ class DBService:
             f"{REST_PREFIX}/event_rsvps",
             params={
                 "event_id": f"eq.{event_id}",
-                "select": "*,profiles(id,name,email)",
+                "select": "*,profiles(id,name)",
                 "order": "waitlist_position.asc.nullslast,created_at.asc",
             },
             headers=self._user_headers(jwt),
@@ -1498,7 +1521,7 @@ class DBService:
         """Public profile of an attendee, to name them on the scanner screen."""
         r = await self._client.get(
             f"{REST_PREFIX}/profiles",
-            params={"id": f"eq.{user_id}", "select": "id,name,email", "limit": "1"},
+            params={"id": f"eq.{user_id}", "select": "id,name", "limit": "1"},
             headers=self._user_headers(jwt),
         )
         await self._raise_for_supabase(r)

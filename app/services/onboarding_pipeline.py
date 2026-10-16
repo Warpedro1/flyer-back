@@ -1,7 +1,12 @@
-"""Onboarding validate/complete orchestration (guard → taste → embedding → profile → Chroma)."""
+"""Onboarding validate/complete orchestration (guard → taste → embeddings → taste docs → profile).
+
+Each step has its own time limit (#26); together they fit a 60 s Vercel function
+(``ONBOARDING_BUDGET_SECONDS``).
+"""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from typing import Any
@@ -9,6 +14,7 @@ from typing import Any
 from fastapi import HTTPException, status
 
 from app.core.config import settings
+from app.core.errors import ApiError
 from app.data.onboarding_guide import (
     GUIDE_SCHEMA_VERSION,
     build_guard_corpus,
@@ -17,11 +23,21 @@ from app.data.onboarding_guide import (
 from app.models.schemas import CompleteOnboardingOut
 from app.services.ai_service import ai_service
 from app.services.db_service import DBService
-from app.services.onboarding_contract import ordered_qa_tuples, validate_onboarding_answers
+from app.services.onboarding_contract import (
+    ordered_qa_tuples,
+    validate_onboarding_answers,
+)
 from app.services.onboarding_guard import GuardResult, run_onboarding_guard
-from app.services.taste_extraction import StepQA, build_canonical_taste_corpus, extract_tastes_per_step
+from app.services.taste_extraction import (
+    StepQA,
+    build_canonical_taste_corpus,
+    extract_tastes_per_step,
+)
 
 logger = logging.getLogger(__name__)
+
+PROFILE_WRITE_FAILED = "profile_write_failed"
+PROFILE_WRITE_FAILED_MESSAGE = "Não foi possível guardar o teu perfil. Tenta de novo daqui a pouco."
 
 
 def _map_guard_failure_to_http(gr: GuardResult) -> HTTPException:
@@ -58,7 +74,11 @@ async def run_complete_onboarding_pipeline(
     validated = validate_onboarding_answers(answers_raw)
     answers = validated.answers
 
-    await db.get_or_create_profile(user_id, jwt)
+    try:
+        await db.get_or_create_profile(user_id, jwt)
+    except Exception:
+        logger.exception("Onboarding profile read failed")
+        raise ApiError(500, PROFILE_WRITE_FAILED, PROFILE_WRITE_FAILED_MESSAGE) from None
 
     corpus = build_guard_corpus(answers)
     gr = await run_onboarding_guard(corpus)
@@ -76,12 +96,15 @@ async def run_complete_onboarding_pipeline(
     # (OpenAI). Surface its failure with a stable code instead of a generic 500,
     # so a missing/invalid OPENAI key doesn't silently leave the profile vector-less.
     try:
-        embedding_vec = await ai_service.generate_embedding(canonical)
-        doc_vecs = await ai_service.generate_embeddings([d.page_content for d in documents])
+        timeout = settings.EMBEDDING_TIMEOUT_SECONDS
+        embedding_vec, doc_vecs = await asyncio.gather(
+            ai_service.generate_embedding(canonical, timeout=timeout),
+            ai_service.generate_embeddings([d.page_content for d in documents], timeout=timeout),
+        )
     except HTTPException:
         raise
     except Exception:
-        logger.exception("Onboarding embedding generation failed (user_id=%s)", user_id)
+        logger.exception("Onboarding embedding generation failed")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={"code": "embedding_generation_failed"},
@@ -103,7 +126,7 @@ async def run_complete_onboarding_pipeline(
     try:
         await db.upsert_user_taste_documents(user_id, taste_items)
     except Exception:
-        logger.exception("User taste documents upsert failed (user_id=%s)", user_id)
+        logger.exception("User taste documents upsert failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"code": "vector_store_write_failed"},
@@ -111,16 +134,20 @@ async def run_complete_onboarding_pipeline(
 
     # Single row update: embedding + preferences text/hash/version are committed
     # together, so we never persist an embedding without its matching prefs text.
-    await db.update_profile(
-        user_id,
-        {
-            "interest_embedding": embedding_vec,
-            "onboarding_preferences_text": store_text,
-            "onboarding_preferences_hash": digest,
-            "guide_schema_version": GUIDE_SCHEMA_VERSION,
-        },
-        jwt,
-    )
+    try:
+        await db.update_profile(
+            user_id,
+            {
+                "interest_embedding": embedding_vec,
+                "onboarding_preferences_text": store_text,
+                "onboarding_preferences_hash": digest,
+                "guide_schema_version": GUIDE_SCHEMA_VERSION,
+            },
+            jwt,
+        )
+    except Exception:
+        logger.exception("Onboarding profile write failed")
+        raise ApiError(500, PROFILE_WRITE_FAILED, PROFILE_WRITE_FAILED_MESSAGE) from None
 
     return CompleteOnboardingOut(
         ok=True,
@@ -132,7 +159,7 @@ async def run_complete_onboarding_pipeline(
 async def ensure_interest_embedding(
     db: DBService,
     user_id: str,
-    jwt: str,  # noqa: ARG001 (kept for signature parity with other user-scoped helpers)
+    jwt: str,
     profile: dict[str, Any],
 ) -> list[float] | None:
     """Lazy backfill: rebuild `interest_embedding` from stored preferences text when missing.
@@ -149,7 +176,7 @@ async def ensure_interest_embedding(
     try:
         vec = await ai_service.generate_embedding(text)
     except Exception:
-        logger.exception("Lazy interest-embedding rebuild failed (user_id=%s)", user_id)
+        logger.exception("Lazy interest-embedding rebuild failed")
         return None
     if not vec:
         return None

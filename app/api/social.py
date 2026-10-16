@@ -50,7 +50,6 @@ async def list_follow_requests(
             follower=ProfileBrief(
                 id=r["follower_id"],
                 name=r.get("follower_name"),
-                email=r.get("follower_email"),
             ),
         )
         for r in rows
@@ -90,7 +89,7 @@ async def list_following(
 ) -> list[ProfileBrief]:
     user_id, jwt = auth
     rows = await db.get_following_list(user_id, jwt)
-    return [ProfileBrief(id=r["id"], name=r.get("name"), email=r.get("email")) for r in rows]
+    return [ProfileBrief(id=r["id"], name=r.get("name")) for r in rows]
 
 
 @router.get("/followers", response_model=list[ProfileBrief])
@@ -100,7 +99,7 @@ async def list_followers(
 ) -> list[ProfileBrief]:
     user_id, jwt = auth
     rows = await db.get_followers_list(user_id, jwt)
-    return [ProfileBrief(id=r["id"], name=r.get("name"), email=r.get("email")) for r in rows]
+    return [ProfileBrief(id=r["id"], name=r.get("name")) for r in rows]
 
 
 @router.get("/health")

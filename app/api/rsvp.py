@@ -93,7 +93,6 @@ def _row_to_rsvp_with_profile(row: dict[str, Any]) -> RsvpWithProfile:
         profile=ProfileBrief(
             id=str(profile.get("id") or row["user_id"]),
             name=profile.get("name"),
-            email=profile.get("email"),
         ),
     )
 
@@ -348,7 +347,6 @@ async def scan_ticket(
         attendee=ProfileBrief(
             id=claims.user_id,
             name=profile.get("name") if profile else None,
-            email=profile.get("email") if profile else None,
         ),
     )
 
