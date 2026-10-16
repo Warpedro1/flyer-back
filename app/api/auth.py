@@ -33,6 +33,7 @@ from app.api.deps import (
     remember_verified_session,
 )
 from app.core.br_documents import mask_cpf, mask_phone
+from app.core.errors import ApiError, session_invalid
 from app.core.limiter import limiter
 from app.models.schemas import (
     EmailCodeIn,
@@ -221,9 +222,25 @@ async def email_code_status(
 @router.post("/email-code/send", status_code=status.HTTP_204_NO_CONTENT)
 @limiter.limit("3/10minute")
 async def send_email_code(request: Request, session: PendingDep, db: DbServiceDep) -> Response:
-    """E-mail a 6-digit code to the account's own address."""
+    """E-mail a 6-digit code to the account's own address.
+
+    Supabase's refusals are said plainly (#30): a code sent less than a minute ago
+    (429), or a session whose account no longer exists (400/404/422).
+    """
     email, _ = _require_code_session(session)
-    await db.send_email_code(email)
+    try:
+        await db.send_email_code(email)
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        if code == status.HTTP_429_TOO_MANY_REQUESTS:
+            raise ApiError(
+                code,
+                "email_code_recently_sent",
+                "Já enviámos um código há menos de 1 minuto. Espera um pouco e pede outro.",
+            ) from None
+        if code in (400, 404, 422):
+            raise session_invalid() from None
+        raise
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

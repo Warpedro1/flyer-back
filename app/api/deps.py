@@ -9,6 +9,7 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import settings
+from app.core.request_context import set_current_user
 from app.core.security import decode_access_token, session_needs_email_code
 from app.services.db_service import DBService
 
@@ -93,6 +94,7 @@ async def _authenticated_payload(
     and skip any screen.
     """
     payload = decode_access_token(token, settings.SUPABASE_JWT_SECRET)
+    set_current_user(str(payload["sub"]))
     if session_needs_email_code(payload):
         session_id = payload.get("session_id")
         if not isinstance(session_id, str) or not await _session_verified(request, session_id):
@@ -145,6 +147,7 @@ async def get_current_user_pending_code(
     (`tests/test_route_auth.py` refuses it anywhere else).
     """
     payload = decode_access_token(credentials.credentials, settings.SUPABASE_JWT_SECRET)
+    set_current_user(str(payload["sub"]))
     email = payload.get("email")
     session_id = payload.get("session_id")
     return PendingSession(

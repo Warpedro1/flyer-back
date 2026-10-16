@@ -108,9 +108,15 @@ class Settings(BaseSettings):
     ONBOARDING_ANSWER_MAX_CHARS: int = Field(default=400, ge=50, le=2000)
     ONBOARDING_ANSWERS_TOTAL_MAX_CHARS: int = Field(default=2200, ge=200, le=10000)
     ONBOARDING_ANSWER_ELABORATE_MIN_CHARS: int = Field(default=40, ge=10, le=500)
-    GUARD_JUDGE_TIMEOUT_SECONDS: float = Field(default=45.0, ge=5.0, le=120.0)
-    TASTE_EXTRACT_TIMEOUT_SECONDS: float = Field(default=45.0, ge=5.0, le=120.0)
-    MODERATION_TIMEOUT_SECONDS: float = Field(default=15.0, ge=3.0, le=60.0)
+    # Time limits, retries included (#26). Their sum stays under the budget so the
+    # onboarding fits a 60 s Vercel function; a slow judge or extraction lets it go on.
+    ONBOARDING_BUDGET_SECONDS: float = 50.0
+    MODERATION_TIMEOUT_SECONDS: float = Field(default=8.0, ge=3.0, le=60.0)
+    GUARD_JUDGE_TIMEOUT_SECONDS: float = Field(default=15.0, ge=5.0, le=120.0)
+    TASTE_EXTRACT_TIMEOUT_SECONDS: float = Field(default=15.0, ge=5.0, le=120.0)
+    EMBEDDING_TIMEOUT_SECONDS: float = Field(default=8.0, ge=3.0, le=60.0)
+    # OpenAI shut down text-moderation-latest on 2025-10-27 (#26).
+    MODERATION_MODEL: str = "omni-moderation-latest"
     # Number of per-step taste docs retrieved and injected into the chat system prompt.
     CHAT_TASTE_MATCH_COUNT: int = Field(default=4, ge=1, le=20)
 

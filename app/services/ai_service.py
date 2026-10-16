@@ -2,35 +2,86 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import math
+from collections.abc import Awaitable
+from typing import Any, TypeVar
 
 from openai import AsyncOpenAI
 
 from app.core.config import settings
+from app.services import error_log
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+
+def _build_client() -> AsyncOpenAI:
+    """With LangSmith tracing on, every OpenAI call is traced (#25 phase 1): model,
+    duration, tokens, errors and, by decision 2026-10-16, the text."""
+    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    if not (settings.LANGSMITH_TRACING and settings.LANGSMITH_API_KEY):
+        return client
+    try:
+        from langsmith import traceable
+        from langsmith.wrappers import wrap_openai
+
+        client = wrap_openai(client)
+        # wrap_openai covers chat only; embeddings and moderation are traced here.
+        client.embeddings.create = traceable(  # type: ignore[method-assign]
+            name="openai.embeddings", run_type="embedding"
+        )(client.embeddings.create)
+        client.moderations.create = traceable(  # type: ignore[method-assign]
+            name="openai.moderations", run_type="tool"
+        )(client.moderations.create)
+    except Exception as exc:  # noqa: BLE001 — tracing is optional
+        logger.warning("LangSmith tracing unavailable (%s); calls are not traced", type(exc).__name__)
+    return client
+
+
+async def _limited(call: Awaitable[T], timeout: float | None) -> T:
+    """`timeout` covers the whole call, the SDK's retries included."""
+    if timeout is None:
+        return await call
+    return await asyncio.wait_for(call, timeout=timeout)
 
 
 class AIService:
     """Uses AsyncOpenAI; system prompt kept separate from user messages."""
 
     def __init__(self) -> None:
-        self._client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        self._client = _build_client()
 
-    async def generate_embedding(self, text: str) -> list[float]:
-        response = await self._client.embeddings.create(
-            model=settings.EMBEDDING_MODEL,
-            input=text,
-            dimensions=settings.EMBEDDING_DIMENSIONS,
+    @staticmethod
+    def _timeout_kwargs(timeout: float | None) -> dict[str, Any]:
+        return {"timeout": timeout} if timeout is not None else {}
+
+    async def generate_embedding(self, text: str, *, timeout: float | None = None) -> list[float]:
+        response = await _limited(
+            self._client.embeddings.create(
+                model=settings.EMBEDDING_MODEL,
+                input=text,
+                dimensions=settings.EMBEDDING_DIMENSIONS,
+                **self._timeout_kwargs(timeout),
+            ),
+            timeout,
         )
         return list(response.data[0].embedding)
 
-    async def generate_embeddings(self, texts: list[str]) -> list[list[float]]:
+    async def generate_embeddings(self, texts: list[str], *, timeout: float | None = None) -> list[list[float]]:
         """Batch embeddings in a single request (one OpenAI call for all inputs)."""
         if not texts:
             return []
-        response = await self._client.embeddings.create(
-            model=settings.EMBEDDING_MODEL,
-            input=texts,
-            dimensions=settings.EMBEDDING_DIMENSIONS,
+        response = await _limited(
+            self._client.embeddings.create(
+                model=settings.EMBEDDING_MODEL,
+                input=texts,
+                dimensions=settings.EMBEDDING_DIMENSIONS,
+                **self._timeout_kwargs(timeout),
+            ),
+            timeout,
         )
         ordered = sorted(response.data, key=lambda d: d.index)
         return [list(d.embedding) for d in ordered]
@@ -121,15 +172,33 @@ class AIService:
         return AIService._weighted_sum(current, new, weight_current, weight_new)
 
     async def moderate_text(self, text: str) -> tuple[bool, list[str]]:
-        """Return (is_allowed, flagged_categories_or_reasons)."""
+        """Return (is_allowed, flagged_categories_or_reasons).
+
+        A failure (model gone, timeout, key) is ``["moderation_api_error"]``, logged
+        and recorded in `app_errors`: it used to be swallowed, and a model OpenAI
+        shut down blocked every onboarding unnoticed (#26).
+        """
         if not (text or "").strip():
             return True, []
+        timeout = settings.MODERATION_TIMEOUT_SECONDS
         try:
-            resp = await self._client.moderations.create(
-                model="text-moderation-latest",
-                input=text[:8000],
+            resp = await _limited(
+                self._client.moderations.create(
+                    model=settings.MODERATION_MODEL,
+                    input=text[:8000],
+                    timeout=timeout,
+                ),
+                timeout,
             )
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — every failure means "unavailable"
+            logger.warning("Moderation failed (%s)", type(exc).__name__)
+            await error_log.record_error(
+                source="ai",
+                code="moderation_api_error",
+                error_type=type(exc).__name__,
+                message=str(exc),
+                details={"model": settings.MODERATION_MODEL},
+            )
             return False, ["moderation_api_error"]
         result = resp.results[0]
         if result.flagged:

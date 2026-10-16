@@ -284,13 +284,16 @@ class FollowRead(BaseModel):
 
 
 class ProfileBrief(BaseModel):
-    """Minimal profile for social lists (no mass assignment)."""
+    """What one user sees of another: followers, requests, attendees, the scanner.
+
+    Never the e-mail (#30, privacy): the creator of an event saw the address of
+    everyone going. The public @username and nickname come with #32.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     id: str
     name: str | None = None
-    email: str | None = None
 
 
 class FollowAction(BaseModel):
@@ -753,3 +756,16 @@ class EmailCodeIn(BaseModel):
 
 
 EventRead.model_rebuild()
+
+
+class ClientErrorIn(BaseModel):
+    """An error caught by the app's error screen (#33), recorded in `app_errors`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(min_length=1, max_length=500)
+    route: str = Field(max_length=200)
+    code: str | None = Field(default=None, max_length=64)
+    # The reference of the API response that failed, when there was one.
+    request_id: str | None = Field(default=None, max_length=64)
+    stack: str | None = Field(default=None, max_length=2000)

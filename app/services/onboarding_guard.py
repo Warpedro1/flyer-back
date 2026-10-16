@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -9,9 +10,11 @@ from typing import Any
 
 from langchain_core.runnables import RunnableLambda, RunnableSequence
 from langchain_openai import ChatOpenAI
+from openai import APITimeoutError
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
+from app.services import error_log
 from app.services.ai_service import ai_service
 
 logger = logging.getLogger(__name__)
@@ -101,13 +104,7 @@ async def _judge_llm(state: dict[str, Any]) -> dict[str, Any]:
     if not settings.ENABLE_ONBOARDING_GUARDS:
         return state
     model = (settings.GUARD_JUDGE_MODEL or "").strip() or settings.LLM_MODEL
-    llm = ChatOpenAI(
-        api_key=settings.OPENAI_API_KEY,
-        model=model,
-        timeout=settings.GUARD_JUDGE_TIMEOUT_SECONDS,
-        temperature=0,
-    )
-    structured = llm.with_structured_output(JudgeVerdict)
+    timeout = settings.GUARD_JUDGE_TIMEOUT_SECONDS
     system = (
         "És um classificador de segurança para respostas de onboarding de uma app de eventos (pt-BR). "
         "Recebes perguntas oficiais e respostas do utilizador. "
@@ -116,13 +113,31 @@ async def _judge_llm(state: dict[str, Any]) -> dict[str, Any]:
     )
     human = str(state.get("normalized", ""))
     try:
-        verdict: JudgeVerdict = await structured.ainvoke(
-            [{"role": "system", "content": system}, {"role": "user", "content": human}]
+        # Built inside the try: a bad model or key is "unavailable", not a 500 (#26).
+        llm = ChatOpenAI(api_key=settings.OPENAI_API_KEY, model=model, timeout=timeout, temperature=0)
+        structured = llm.with_structured_output(JudgeVerdict)
+        verdict: JudgeVerdict = await asyncio.wait_for(
+            structured.ainvoke([{"role": "system", "content": system}, {"role": "user", "content": human}]),
+            timeout=timeout,
         )
-    except Exception:
+    except (TimeoutError, APITimeoutError) as exc:
+        # Moderation already passed: a slow judge lets the onboarding go on (#26).
+        logger.warning("Onboarding LLM judge timed out after %ss; continuing.", timeout)
+        await error_log.record_error(
+            source="ai", code="llm_judge_timeout", error_type=type(exc).__name__, details={"model": model}
+        )
+        return state
+    except Exception as exc:
         # Fail closed: an unavailable judge surfaces as a transient 503 (mapped from
         # "moderation_unavailable") instead of an unhandled 500 / silent pass-through.
         logger.exception("Onboarding LLM judge failed; failing closed (unavailable).")
+        await error_log.record_error(
+            source="ai",
+            code="llm_judge_error",
+            error_type=type(exc).__name__,
+            message=str(exc),
+            details={"model": model},
+        )
         return {
             **state,
             "blocked": True,
@@ -148,7 +163,7 @@ _onboarding_guard_chain: RunnableSequence = RunnableSequence(
 
 
 async def run_onboarding_guard(combined_text: str) -> GuardResult:
-    """Fail closed: moderation API errors surface as not ok (caller maps to 500)."""
+    """Fail closed: moderation API errors surface as not ok (the pipeline answers 503)."""
     if not (combined_text or "").strip():
         return GuardResult(ok=False, block_code="empty_corpus", detail_codes=[])
 

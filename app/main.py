@@ -5,13 +5,17 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from app.api import admin, auth, chat, events, plans, rsvp, social, trophies
+from app.api import admin, auth, chat, events, plans, rsvp, social, telemetry, trophies
 from app.core.config import settings
+from app.core.errors import install_error_handlers
 from app.core.limiter import limiter
+from app.core.log_config import configure_logging
+from app.core.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
+from app.services import error_log
+
+configure_logging()
 
 
 @asynccontextmanager
@@ -21,7 +25,9 @@ async def lifespan(app: FastAPI):
         base_url=settings.SUPABASE_URL.rstrip("/"),
         timeout=httpx.Timeout(30.0),
     )
+    error_log.set_client(app.state.http_client)
     yield
+    error_log.set_client(None)
     await app.state.http_client.aclose()
 
 
@@ -33,8 +39,11 @@ app = FastAPI(
 )
 
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+install_error_handlers(app)
+# Order matters: the last one added is the outermost. RequestContextMiddleware sits
+# inside CORS so its last-resort 500 still gets the CORS headers (#30).
 app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(RequestContextMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,7 +52,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
     # Custom response headers are invisible to a cross-origin fetch unless listed.
-    expose_headers=[events.DISCOVERY_MODE_HEADER],
+    expose_headers=[events.DISCOVERY_MODE_HEADER, REQUEST_ID_HEADER],
 )
 
 app.include_router(auth.router)
@@ -53,6 +62,7 @@ app.include_router(rsvp.router)
 app.include_router(plans.router)
 app.include_router(social.router)
 app.include_router(trophies.router)
+app.include_router(telemetry.router)
 app.include_router(admin.router)
 
 
