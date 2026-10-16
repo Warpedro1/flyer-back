@@ -42,13 +42,15 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging() -> None:
-    """JSON lines on stdout for the app's loggers. Safe to call more than once."""
+    """JSON lines on stdout, the only handler of the root logger. Safe to call twice."""
     root = logging.getLogger()
     if any(isinstance(h.formatter, JsonFormatter) for h in root.handlers):
         return
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
-    root.addHandler(handler)
+    # Replaces the platform's handler (Vercel's Python runtime adds a plain-text one),
+    # or every line would come out twice.
+    root.handlers[:] = [handler]
     root.setLevel(logging.INFO)
     # httpx logs every request URL at INFO, PostgREST filters included (e-mails, CPFs).
     logging.getLogger("httpx").setLevel(logging.WARNING)
