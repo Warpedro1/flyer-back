@@ -11,6 +11,13 @@ This is a two-project monorepo for **Flyer**, an event-recommendation and social
 
 The conventions below are canonical for both projects.
 
+## Language (decision 2026-10-17)
+
+Everything the user sees is **Brazilian Portuguese (pt-BR)**: screens, API messages (`detail`), validation errors, e-mail templates, and LLM prompts whose output reaches the user. Never European Portuguese.
+- Address the user as **você** ("seu/sua"), never "tu/teu/tua". Imperatives in the 3rd person ("Tente", "Aguarde", "Verifique", "Entre", "Escolha"); actions in progress in the gerund ("Carregando…", "Salvando…", "Enviando…"), never "A carregar…". Past tense without the accent ("Enviamos", "Não encontramos").
+- Vocabulary: tela (not ecrã), usuário (not utilizador), compartilhar, ingresso (not bilhete), câmera, gerenciar, salvar (not guardar), registrar, atual, conexão, configurações, arquivo, equipe, "Meus eventos", "Algo deu errado".
+- Guards: `Flyer/src/ptBR.test.ts` (app source without comments, plus `index.html` with `lang="pt-BR"`) and `FlyerBack/tests/test_pt_br.py` (string literals in `app/`, without docstrings, plus `supabase/templates/`). Code, comments, logs and docs for developers stay in English.
+
 ## Commands
 
 ### Frontend (`Flyer/`)

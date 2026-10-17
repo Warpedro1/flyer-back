@@ -27,7 +27,7 @@ def test_corpus_has_only_what_the_user_wrote() -> None:
     # vector towards the model's own vocabulary.
     messages = [
         {"sender": "user", "content": "Gosto de jazz ao vivo"},
-        {"sender": "assistant", "content": "Recomendo o festival de música eletrónica"},
+        {"sender": "assistant", "content": "Recomendo o festival de música eletrônica"},
         {"sender": "user", "content": "e de teatro"},
     ]
 
@@ -35,7 +35,7 @@ def test_corpus_has_only_what_the_user_wrote() -> None:
 
     assert "jazz ao vivo" in corpus
     assert "teatro" in corpus
-    assert "eletrónica" not in corpus
+    assert "eletrônica" not in corpus
 
 
 def test_corpus_is_empty_without_user_messages() -> None:

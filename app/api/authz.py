@@ -59,7 +59,7 @@ def require_not_place(event: dict[str, Any]) -> None:
     if event.get("kind") == "place":
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Lugares não têm inscrição: escolhe um evento.",
+            detail="Lugares não têm inscrição: escolha um evento.",
         )
 
 
@@ -77,7 +77,7 @@ def require_trophy_icon(user_id: str, path: str) -> None:
     if _is_absolute_url(path) or extension not in _IMAGE_EXTENSIONS:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="O ícone do troféu tem de ser uma imagem enviada para o Flyer.",
+            detail="O ícone do troféu precisa ser uma imagem enviada para o Flyer.",
         )
     require_media_paths_owned(user_id, [path])
 
@@ -97,5 +97,5 @@ def require_media_paths_owned(user_id: str, paths: Iterable[str]) -> None:
         if folder != user_id or not rest or any(s in {"", ".", ".."} for s in segments):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Só podes anexar ficheiros que tu próprio enviaste.",
+                detail="Você só pode anexar arquivos que você mesmo enviou.",
             )

@@ -28,7 +28,7 @@ REQUEST_ID_HEADER = "X-Request-Id"
 _VALID_REQUEST_ID = re.compile(r"^[A-Za-z0-9-]{8,64}$")
 
 INTERNAL_ERROR_CODE = "internal_error"
-INTERNAL_ERROR_MESSAGE = "Erro interno. Tenta de novo daqui a pouco."
+INTERNAL_ERROR_MESSAGE = "Erro interno. Tente de novo em instantes."
 
 logger = logging.getLogger(__name__)
 access_logger = logging.getLogger("app.access")

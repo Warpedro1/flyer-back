@@ -20,6 +20,8 @@ from app.core.limiter import limiter
 from app.main import app
 
 NOW = datetime.now(timezone.utc)
+# Tomorrow, so the event never "ends" while the suite is still in use.
+START = (NOW + timedelta(days=1)).replace(microsecond=0)
 ROW: dict[str, Any] = {
     "id": "evt-1",
     "kind": "event",
@@ -32,9 +34,9 @@ ROW: dict[str, Any] = {
     "location_name": "Paço do Frevo",
     "lat": -8.06,
     "long": -34.87,
-    "event_date": "2026-10-16T23:00:00+00:00",
-    "ends_at": "2026-10-17T02:00:00+00:00",
-    "checkin_opens_at": "2026-10-16T23:00:00+00:00",
+    "event_date": START.isoformat(),
+    "ends_at": (START + timedelta(hours=3)).isoformat(),
+    "checkin_opens_at": START.isoformat(),
     "checkin_closed_at": None,
     "price": "20.00",
     "capacity": 30,
@@ -71,7 +73,7 @@ def db() -> Iterator[MagicMock]:
     fake.replace_event_media = AsyncMock()
     fake.upsert_trophy_template = AsyncMock()
     fake.get_trophy_template_by_event = AsyncMock(
-        return_value={"id": "tpl-1", "name": "Passista", "description": "Dançaste", "icon_url": "user-1/trofeu.png"}
+        return_value={"id": "tpl-1", "name": "Passista", "description": "Dançou muito", "icon_url": "user-1/trofeu.png"}
     )
     fake.get_event_media_rows = AsyncMock(
         return_value=[{"media_url": "user-1/foto.jpg", "type": "image", "order_index": 0}]
@@ -186,11 +188,11 @@ def test_edit_form_gets_paths_and_previews(db: MagicMock) -> None:
     ]
     assert body["trophy"] == {
         "name": "Passista",
-        "description": "Dançaste",
+        "description": "Dançou muito",
         "icon_url": "user-1/trofeu.png",
         "icon_preview_url": "https://signed/user-1/trofeu.png",
     }
-    assert body["ends_at"].startswith("2026-10-17T02:00:00")
+    assert datetime.fromisoformat(body["ends_at"]) == START + timedelta(hours=3)
 
 
 def test_only_the_creator_gets_the_edit_form(db: MagicMock) -> None:

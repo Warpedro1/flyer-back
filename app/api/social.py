@@ -19,17 +19,17 @@ async def follow_user(
 ) -> dict[str, str]:
     user_id, jwt = auth
     if user_id == target_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot follow yourself.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Você não pode seguir a si mesmo.")
     privacy = await db.get_target_privacy(target_id, jwt)
     if privacy is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuário não encontrado.")
     status_val = FollowStatus.pending if privacy else FollowStatus.accepted
     try:
         await db.create_follow(user_id, target_id, status_val, jwt)
     except UniqueViolationError:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Follow relationship already exists.",
+            detail="Você já segue esta pessoa ou já pediu para seguir.",
         ) from None
     return {"status": "created"}
 
