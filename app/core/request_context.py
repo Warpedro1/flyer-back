@@ -116,6 +116,10 @@ class RequestContextMiddleware:
                 raise
             await self._internal_error(scope, receive, send_with_id, exc, ctx)
         finally:
+            # Before the request ends: Vercel freezes the function right after.
+            from app.services.tracing import flush_traces
+
+            await flush_traces()
             access_logger.info(
                 "%s %s %s",
                 scope.get("method"),
