@@ -11,6 +11,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
+from app.services.llm_options import chat_model_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ def _get_structured_extractor():
             api_key=settings.OPENAI_API_KEY,
             model=model,
             timeout=settings.TASTE_EXTRACT_TIMEOUT_SECONDS,
-            temperature=0.2,
+            **chat_model_kwargs(model, temperature=0.2),
         )
         _structured_extractor = llm.with_structured_output(TasteSignals)
     return _structured_extractor

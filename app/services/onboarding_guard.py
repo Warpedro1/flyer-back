@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from app.core.config import settings
 from app.services import error_log
 from app.services.ai_service import ai_service
+from app.services.llm_options import chat_model_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +115,12 @@ async def _judge_llm(state: dict[str, Any]) -> dict[str, Any]:
     human = str(state.get("normalized", ""))
     try:
         # Built inside the try: a bad model or key is "unavailable", not a 500 (#26).
-        llm = ChatOpenAI(api_key=settings.OPENAI_API_KEY, model=model, timeout=timeout, temperature=0)
+        llm = ChatOpenAI(
+            api_key=settings.OPENAI_API_KEY,
+            model=model,
+            timeout=timeout,
+            **chat_model_kwargs(model, temperature=0),
+        )
         structured = llm.with_structured_output(JudgeVerdict)
         verdict: JudgeVerdict = await asyncio.wait_for(
             structured.ainvoke([{"role": "system", "content": system}, {"role": "user", "content": human}]),
