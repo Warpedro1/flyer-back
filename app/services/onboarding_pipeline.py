@@ -37,7 +37,7 @@ from app.services.taste_extraction import (
 logger = logging.getLogger(__name__)
 
 PROFILE_WRITE_FAILED = "profile_write_failed"
-PROFILE_WRITE_FAILED_MESSAGE = "Não foi possível guardar o teu perfil. Tenta de novo daqui a pouco."
+PROFILE_WRITE_FAILED_MESSAGE = "Não foi possível salvar seu perfil. Tente de novo em instantes."
 
 
 def _map_guard_failure_to_http(gr: GuardResult) -> HTTPException:

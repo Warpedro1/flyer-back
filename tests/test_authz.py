@@ -32,9 +32,9 @@ def test_anyone_else_is_refused(owner_id: str | None) -> None:
 
 def test_refusal_detail_can_be_specific() -> None:
     with pytest.raises(HTTPException) as exc:
-        require_owner("someone-else", "user-1", detail="Não é teu.")
+        require_owner("someone-else", "user-1", detail="Não é seu.")
 
-    assert exc.value.detail == "Não é teu."
+    assert exc.value.detail == "Não é seu."
 
 
 # --------------------------------------------------------- event creator --

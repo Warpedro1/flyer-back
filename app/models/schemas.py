@@ -197,7 +197,7 @@ class DiscoverRequest(BaseModel):
     @model_validator(mode="after")
     def _dates_in_order(self) -> "DiscoverRequest":
         if self.date_from and self.date_to and self.date_from > self.date_to:
-            raise ValueError("date_from must not be after date_to.")
+            raise ValueError("A data inicial não pode ser depois da data final.")
         return self
 
 
@@ -390,7 +390,7 @@ class EventRecurrence(BaseModel):
     @classmethod
     def _valid_time(cls, v: str | None) -> str | None:
         if v is not None and not _HHMM_RE.fullmatch(v):
-            msg = "time_of_day must be HH:MM (24h)"
+            msg = "O horário precisa estar no formato HH:MM (24h)."
             raise ValueError(msg)
         return v
 
@@ -400,7 +400,7 @@ class EventRecurrence(BaseModel):
         if v is None:
             return v
         if not v or any(d < 0 or d > 6 for d in v):
-            msg = "weekdays must be a non-empty list of integers 0..6"
+            msg = "Escolha pelo menos um dia da semana."
             raise ValueError(msg)
         return sorted(set(v))
 
@@ -408,18 +408,18 @@ class EventRecurrence(BaseModel):
     def _require_fields_per_mode(self) -> "EventRecurrence":
         if self.mode == RecurrenceMode.count:
             if self.every is None or self.occurrences is None:
-                msg = "count recurrence requires 'every' and 'occurrences'"
+                msg = "A recorrência por quantidade precisa do intervalo e do número de vezes."
                 raise ValueError(msg)
         elif self.mode == RecurrenceMode.weekly:
             if not self.weekdays or self.time_of_day is None or self.until is None:
-                msg = "weekly recurrence requires 'weekdays', 'time_of_day' and 'until'"
+                msg = "A recorrência semanal precisa dos dias, do horário e da data final."
                 raise ValueError(msg)
         elif self.mode == RecurrenceMode.range:
             if self.start is None or self.end is None or self.time_of_day is None:
-                msg = "range recurrence requires 'start', 'end' and 'time_of_day'"
+                msg = "A recorrência por período precisa do início, do fim e do horário."
                 raise ValueError(msg)
             if self.end < self.start:
-                msg = "range 'end' must be on or after 'start'"
+                msg = "O fim do período precisa ser igual ou depois do início."
                 raise ValueError(msg)
         return self
 
@@ -489,9 +489,9 @@ class _EventFields(BaseModel):
     @model_validator(mode="after")
     def _window_in_order(self) -> Self:
         if self.ends_at <= self.event_date:
-            raise ValueError("O fim tem de ser depois do início.")
+            raise ValueError("O término precisa ser depois do início.")
         if self.checkin_opens_at is not None and self.checkin_opens_at >= self.ends_at:
-            raise ValueError("O check-in tem de abrir antes do fim do evento.")
+            raise ValueError("O check-in precisa abrir antes do término do evento.")
         return self
 
 
@@ -650,7 +650,7 @@ def _valid_cpf(value: str) -> str:
 def _valid_phone(value: str) -> str:
     phone = normalize_phone(value)
     if phone is None:
-        raise ValueError("Celular inválido: usa DDD + número com 9 dígitos.")
+        raise ValueError("Celular inválido: use DDD + número com 9 dígitos.")
     return phone
 
 
@@ -670,7 +670,7 @@ class SignupIn(BaseModel):
     def _name(cls, v: str) -> str:
         name = v.strip()
         if not name:
-            raise ValueError("Indica o teu nome.")
+            raise ValueError("Informe seu nome.")
         return name
 
     @field_validator("email")

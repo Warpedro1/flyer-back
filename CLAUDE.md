@@ -11,6 +11,13 @@ This is a two-project monorepo for **Flyer**, an event-recommendation and social
 
 The conventions below are canonical for both projects.
 
+## Language (decision 2026-10-17)
+
+Everything the user sees is **Brazilian Portuguese (pt-BR)**: screens, API messages (`detail`), validation errors, e-mail templates, and LLM prompts whose output reaches the user. Never European Portuguese.
+- Address the user as **você** ("seu/sua"), never "tu/teu/tua". Imperatives in the 3rd person ("Tente", "Aguarde", "Verifique", "Entre", "Escolha"); actions in progress in the gerund ("Carregando…", "Salvando…", "Enviando…"), never "A carregar…". Past tense without the accent ("Enviamos", "Não encontramos").
+- Vocabulary: tela (not ecrã), usuário (not utilizador), compartilhar, ingresso (not bilhete), câmera, gerenciar, salvar (not guardar), registrar, atual, conexão, configurações, arquivo, equipe, "Meus eventos", "Algo deu errado".
+- Guards: `Flyer/src/ptBR.test.ts` (app source without comments, plus `index.html` with `lang="pt-BR"`) and `FlyerBack/tests/test_pt_br.py` (string literals in `app/`, without docstrings, plus `supabase/templates/`). Code, comments, logs and docs for developers stay in English.
+
 ## Commands
 
 ### Frontend (`Flyer/`)
@@ -64,7 +71,7 @@ Key cross-cutting patterns:
 - **Routing** in `App.tsx`: `/login` is standalone; all other pages render inside `AppLayout` (sidebar on desktop, bottom-nav on mobile).
 - **API access.** All backend calls go through `services/flyerApi.ts`, which uses the pre-configured Axios instance in `lib/apiClient.ts`. The request interceptor pulls the Supabase session and injects `Bearer <access_token>`. Note: the response interceptor deliberately does **not** sign out on 401 (a backend JWT-check failure should not eject a user with a valid Supabase session).
 - **Auth/state.** Supabase (`lib/supabase.ts` + `@supabase/supabase-js`) manages session/JWT, exposed through `contexts/AuthProvider.tsx` + `hooks/useAuth.ts`. No global state library (Redux/Zustand/etc.) — this is prohibited.
-- **Errors** (#30, #33). `utils/apiError.ts`: `getApiErrorInfo` reads `detail`, `code`, `request_id` (or the `X-Request-Id` header); `formatApiError` shows 5xx as "… (código: X · ref Y)", FastAPI validation as "Dados inválidos: …", no response as a connection message; `isNotFoundError` for 404. `components/errors/ErrorBoundary.tsx` is the only class component (React has no hook for error boundaries): it wraps the whole app (`main.tsx`) and the layout's `<Outlet>` (keyed by path, so navigating clears it), shows "Algo correu mal" with a ref and reports to `POST /telemetry/client-error` (that ref as `X-Request-Id`; only with a session). Unknown routes render `NotFoundPage`; a 404 from the API renders `NotFoundContent` inside the page. A JS chunk that no longer exists after a deploy reloads the page once (`utils/chunkReload.ts`, also on `vite:preloadError`). A session whose account is gone gets 401 `session_invalid`: sign out and go to `/login`.
+- **Errors** (#30, #33). `utils/apiError.ts`: `getApiErrorInfo` reads `detail`, `code`, `request_id` (or the `X-Request-Id` header); `formatApiError` shows 5xx as "… (código: X · ref Y)", FastAPI validation as "Dados inválidos: …", no response as a connection message; `isNotFoundError` for 404. `components/errors/ErrorBoundary.tsx` is the only class component (React has no hook for error boundaries): it wraps the whole app (`main.tsx`) and the layout's `<Outlet>` (keyed by path, so navigating clears it), shows "Algo deu errado" with a ref and reports to `POST /telemetry/client-error` (that ref as `X-Request-Id`; only with a session). Unknown routes render `NotFoundPage`; a 404 from the API renders `NotFoundContent` inside the page. A JS chunk that no longer exists after a deploy reloads the page once (`utils/chunkReload.ts`, also on `vite:preloadError`). A session whose account is gone gets 401 `session_invalid`: sign out and go to `/login`.
 - **Types.** `types/index.ts` must mirror the backend Pydantic schemas exactly. Decimal fields (money, ratings) are typed as `string | null` on the UI side.
 - **Styling.** Tailwind CSS v4 only (via `@tailwindcss/vite`). Do not add Bootstrap, MUI, or any prebuilt component library. Accent color is `red-600`; prefer `rounded-2xl`/`rounded-3xl`. Root container is `h-screen overflow-hidden`; only `<main>` scrolls (`overflow-y-auto`).
 

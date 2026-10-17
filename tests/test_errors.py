@@ -159,5 +159,5 @@ def test_a_rate_limit_answers_detail_and_code() -> None:
     assert codes[-1] == 429
     body = client.get("/").json()
     assert body["code"] == "rate_limited"
-    assert "Muitos pedidos" in body["detail"]
+    assert "Muitas tentativas" in body["detail"]
     limiter.reset()

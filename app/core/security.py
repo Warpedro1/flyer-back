@@ -37,7 +37,7 @@ def decode_access_token(token: str, secret: str) -> dict[str, Any]:
         logger.warning("JWT expired (JWKS)")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token expired. Please sign in again.",
+            detail="Sessão expirada. Entre novamente.",
             headers={"WWW-Authenticate": "Bearer"},
         ) from None
     except (pyjwt.PyJWKClientError, pyjwt.DecodeError, pyjwt.InvalidTokenError) as exc:
@@ -56,14 +56,14 @@ def decode_access_token(token: str, secret: str) -> dict[str, Any]:
         logger.warning("JWT expired (HS256)")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token expired. Please sign in again.",
+            detail="Sessão expirada. Entre novamente.",
             headers={"WWW-Authenticate": "Bearer"},
         ) from None
     except pyjwt.InvalidTokenError as exc:
         logger.warning("JWT decode failed on both JWKS and HS256: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials.",
+            detail="Sessão inválida: entre novamente.",
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
 
@@ -74,7 +74,7 @@ def _validate_subject(payload: dict[str, Any]) -> dict[str, Any]:
         logger.warning("JWT missing 'sub' claim")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials.",
+            detail="Sessão inválida: entre novamente.",
             headers={"WWW-Authenticate": "Bearer"},
         )
     return payload

@@ -21,9 +21,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.core.request_context import current_request_id, route_of
 
 SESSION_INVALID = "session_invalid"
-SESSION_INVALID_MESSAGE = "Sessão inválida: entra outra vez."
+SESSION_INVALID_MESSAGE = "Sessão inválida: entre novamente."
 RATE_LIMITED = "rate_limited"
-RATE_LIMITED_MESSAGE = "Muitos pedidos seguidos. Espera um pouco e tenta de novo."
+RATE_LIMITED_MESSAGE = "Muitas tentativas seguidas. Aguarde um pouco e tente de novo."
 
 
 class ApiError(Exception):

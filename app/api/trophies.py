@@ -62,12 +62,12 @@ async def check_in_trophy(
     user_id, jwt = auth
     event = await db.get_event_by_id(body.event_id, jwt, select=_CHECKIN_COLUMNS)
     if not event or event.get("lat") is None or event.get("long") is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evento não encontrado.")
     distance = haversine_meters(body.lat, body.long, float(event["lat"]), float(event["long"]))
     if distance > settings.CHECKIN_MAX_DISTANCE_METERS:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Too far from event location.",
+            detail="Você está longe demais do local do evento.",
         )
     # Only while check-in is open (decisions 2026-10-12): otherwise one visit to the
     # venue of a recurring event would collect the trophy of every date.

@@ -26,7 +26,7 @@ class TasteSignals(BaseModel):
     weekend_style: str = ""
     free_text_summary: str = Field(
         default="",
-        description="2–4 frases em pt-BR, factual, sem inventar factos não ditos.",
+        description="2–4 frases em pt-BR, factual, sem inventar fatos que não foram ditos.",
     )
 
 
@@ -74,8 +74,9 @@ def _short_document(qa: StepQA) -> Document:
 async def _extract_elaborate(qa: StepQA) -> TasteSignals:
     chain = _get_structured_extractor()
     system = (
-        "Extrai gostos e restrições implícitas a partir de uma pergunta de onboarding e da "
-        "resposta do utilizador (pt-BR). Não inventes factos. Usa listas curtas quando aplicável."
+        "Extraia gostos e restrições implícitas a partir de uma pergunta de onboarding e da "
+        "resposta do usuário. Escreva tudo em português do Brasil. Não invente fatos. "
+        "Use listas curtas quando fizer sentido."
     )
     user = f"step_key={qa.step_key}\nPergunta: {qa.prompt}\nResposta: {qa.answer}"
     return await chain.ainvoke(
@@ -144,7 +145,7 @@ async def extract_tastes_per_step(qas: list[StepQA]) -> list[Document]:
 
 def build_canonical_taste_corpus(documents: list[Document]) -> str:
     """Single pt-BR block for the interest embedding."""
-    header = "Preferências declaradas no onboarding (síntese canónica):\n"
+    header = "Preferências declaradas no onboarding (síntese canônica):\n"
     blocks: list[str] = []
     for doc in documents:
         key = str(doc.metadata.get("step_key", ""))
