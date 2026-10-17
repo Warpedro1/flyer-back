@@ -24,8 +24,19 @@ from app.main import app
 from app.services.db_service import DBService
 
 NOW = datetime.now(timezone.utc)
-# Check-in is open: the event started an hour ago and ends in two.
+# GPS check-in is for places (decisions 2026-10-17); a place without readable hours is
+# always open. Events created in the app check in by QR, imported ones have none.
 EVENT = {
+    "id": "evt-1",
+    "kind": "place",
+    "title": "Noite de Frevo",
+    "lat": -8.06,
+    "long": -34.87,
+    "source": "google_maps",
+    "opening_hours": None,
+}
+# An event created in the app whose check-in is open: started an hour ago, ends in two.
+APP_EVENT = {
     "id": "evt-1",
     "kind": "event",
     "title": "Noite de Frevo",
@@ -89,7 +100,9 @@ def test_check_in_reads_only_the_columns_it_needs(db: MagicMock) -> None:
 
     select = db.get_event_by_id.await_args.kwargs["select"]
     assert "embedding" not in select
-    assert {"lat", "long", "title", "ends_at", "checkin_opens_at", "opening_hours"} <= set(select.split(","))
+    assert {"lat", "long", "title", "source", "ends_at", "checkin_opens_at", "opening_hours"} <= set(
+        select.split(",")
+    )
 
 
 def test_an_event_without_a_trophy_gets_the_default_one(db: MagicMock) -> None:
@@ -104,58 +117,29 @@ def test_an_event_without_a_trophy_gets_the_default_one(db: MagicMock) -> None:
     db.insert_trophy.assert_awaited_once_with("user-1", "tpl-new", "jwt")
 
 
-# ---------------------------------------------------- check-in time window --
+# -------------------------------------------- who checks in by GPS (2026-10-17) --
 
 
-def test_check_in_before_it_opens_is_refused(db: MagicMock) -> None:
-    db.get_event_by_id.return_value = {
-        **EVENT,
-        "event_date": (NOW + timedelta(days=7)).isoformat(),
-        "checkin_opens_at": (NOW + timedelta(days=7)).isoformat(),
-        "ends_at": (NOW + timedelta(days=7, hours=3)).isoformat(),
-    }
+def test_an_event_created_in_the_app_checks_in_at_the_door(db: MagicMock) -> None:
+    # Reading the ticket's QR is the check-in: GPS alone would let anyone nearby in.
+    db.get_event_by_id.return_value = APP_EVENT
 
     response = TestClient(app).post("/trophies/checkin", json=NEAR)
 
-    assert response.status_code == 403
-    assert "abre" in response.json()["detail"]
+    assert response.status_code == 409
+    assert response.json()["code"] == "checkin_by_qr"
+    assert "mostre seu ingresso" in response.json()["detail"]
     db.insert_trophy.assert_not_called()
 
 
-def test_check_in_after_the_event_ended_is_refused(db: MagicMock) -> None:
-    db.get_event_by_id.return_value = {**EVENT, "ends_at": (NOW - timedelta(minutes=1)).isoformat()}
+def test_an_imported_event_has_no_check_in(db: MagicMock) -> None:
+    # Imported events are only informative: nobody from Flyer is at the door.
+    db.get_event_by_id.return_value = {**APP_EVENT, "source": "sympla"}
 
     response = TestClient(app).post("/trophies/checkin", json=NEAR)
 
-    assert response.status_code == 403
-    assert "fechou" in response.json()["detail"]
-    db.insert_trophy.assert_not_called()
-
-
-def test_a_recurring_event_only_gives_todays_trophy(db: MagicMock) -> None:
-    # Every occurrence shares the venue: standing there once must not collect them all.
-    occurrences = {
-        "today": EVENT,
-        "next-week": {
-            **EVENT,
-            "id": "next-week",
-            "event_date": (NOW + timedelta(days=6, hours=23)).isoformat(),
-            "checkin_opens_at": (NOW + timedelta(days=6, hours=23)).isoformat(),
-            "ends_at": (NOW + timedelta(days=7, hours=2)).isoformat(),
-        },
-    }
-    db.get_event_by_id.side_effect = lambda event_id, jwt, **_: occurrences[event_id]
-    client = TestClient(app)
-
-    assert client.post("/trophies/checkin", json={**NEAR, "event_id": "today"}).status_code == 201
-    assert client.post("/trophies/checkin", json={**NEAR, "event_id": "next-week"}).status_code == 403
-    assert db.insert_trophy.await_count == 1
-
-
-def test_an_event_without_dates_has_no_check_in(db: MagicMock) -> None:
-    db.get_event_by_id.return_value = {**EVENT, "event_date": None, "ends_at": None, "checkin_opens_at": None}
-
-    assert TestClient(app).post("/trophies/checkin", json=NEAR).status_code == 403
+    assert response.status_code == 409
+    assert response.json()["code"] == "checkin_unavailable"
     db.insert_trophy.assert_not_called()
 
 

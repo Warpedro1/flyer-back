@@ -31,6 +31,7 @@ from app.models.schemas import (
     _EventFields,
 )
 from app.services.ai_service import ai_service
+from app.services.checkin_service import checkin_method
 from app.services.checkin_window import checkin_state
 from app.services.event_recurrence import expand_recurrence
 from app.services.interest_sync import parse_interest_embedding
@@ -107,6 +108,7 @@ def _row_to_event_read(
         checkin_opens_at=checkin.opens_at,
         checkin_closes_at=checkin.closes_at,
         checkin_status=checkin.status,
+        checkin_method=checkin_method(row),
         price=_parse_decimal(row.get("price")),
         rating=_parse_decimal(row.get("rating")),
         attendee_count=int(row.get("attendee_count") or 0),

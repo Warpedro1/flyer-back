@@ -47,6 +47,9 @@ EventKind = Literal["event", "place"]
 
 # Whether check-in is possible right now (app/services/checkin_window.py).
 CheckinStatus = Literal["open", "not_yet", "closed", "no_schedule"]
+# How an event checks in (decisions 2026-10-17): `qr` at the door (events created in
+# the app), `gps` (places), `none` (imported events, only informative).
+CheckinMethod = Literal["qr", "gps", "none"]
 
 
 class ChatSender(str, Enum):
@@ -153,6 +156,7 @@ class EventRead(BaseModel):
     checkin_opens_at: datetime | None = None
     checkin_closes_at: datetime | None = None
     checkin_status: CheckinStatus | None = None
+    checkin_method: CheckinMethod = "qr"
     price: Decimal | None = None
     rating: Decimal | None = None
     attendee_count: int = Field(default=0, ge=0)
@@ -609,22 +613,68 @@ class RsvpQrToken(BaseModel):
     expires_at: datetime
 
 
+class RsvpQrRequest(BaseModel):
+    """Where the attendee's phone is, sent with each QR refresh (decisions 2026-10-17).
+
+    In the body, not the URL: a position must not end up in request logs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lat: float | None = Field(default=None, ge=-90.0, le=90.0)
+    long: float | None = Field(default=None, ge=-180.0, le=180.0)
+    accuracy: float | None = Field(default=None, ge=0.0, le=100_000.0)
+    # When the phone took the reading; an old one is ignored.
+    fix_at: datetime | None = None
+
+
 class ScanRequest(BaseModel):
     """Token read off an attendee's QR code by the creator's camera."""
 
     model_config = ConfigDict(extra="forbid")
 
     token: str = Field(min_length=1, max_length=2000)
+    # The creator saw the person at the door although their phone sent no position.
+    confirm_without_location: bool = False
 
 
 class ScanResult(BaseModel):
-    """Outcome of a successful admission."""
+    """Outcome of a successful admission, which is also the check-in."""
 
     model_config = ConfigDict(extra="forbid")
 
     ok: bool = True
     status: RsvpStatus
     attendee: ProfileBrief
+    # The event's trophy; null when it could not be given (the entry still counts).
+    trophy: TrophyRead | None = None
+    # False when the creator confirmed without a position, or the event has no coordinates.
+    location_checked: bool = False
+
+
+class RealtimeConfig(BaseModel):
+    """Pusher's public key and cluster for the app; disabled means poll instead."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    key: str | None = None
+    cluster: str | None = None
+
+
+class RealtimeAuthRequest(BaseModel):
+    """Pusher asks to subscribe ``socket_id`` to ``channel_name``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    socket_id: str = Field(pattern=r"^\d+\.\d+$", max_length=64)
+    channel_name: str = Field(min_length=1, max_length=200)
+
+
+class RealtimeAuthResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    auth: str
 
 
 # ----------------------------------------------------------------- account --

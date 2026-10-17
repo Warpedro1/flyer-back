@@ -8,7 +8,7 @@ import pytest
 
 from app.api.rsvp import (
     _http_from_rpc,
-    _not_admissible_error,
+    _not_admissible,
     _row_to_rsvp,
     _with_ahead_count,
     bucket_attendees,
@@ -151,34 +151,24 @@ def test_row_to_rsvp_parses_timestamps() -> None:
 # ---------------------------------------------------- why the scan failed --
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("status_value", "fragment"),
+    ("status_value", "code", "fragment"),
     [
-        ("waitlisted", "Ainda não é a vez"),
-        ("no_show", "chamada desta pessoa expirou"),
-        ("cancelled", "cancelou a inscrição"),
+        ("waitlisted", "not_your_turn", "Ainda não é a vez"),
+        ("no_show", "call_expired", "chamada desta pessoa expirou"),
+        ("cancelled", "rsvp_cancelled", "cancelou a inscrição"),
+        ("admitted", "already_admitted", "já entrou"),
     ],
 )
-async def test_rejected_scan_explains_the_actual_reason(
-    status_value: str, fragment: str
-) -> None:
+def test_rejected_scan_explains_the_actual_reason(status_value: str, code: str, fragment: str) -> None:
     # The doorkeeper needs to know WHY someone is being turned away, not just that
-    # they are — the generic RPC raise is the same for all three.
-    db = MagicMock()
-    db.get_rsvp_by_id = AsyncMock(return_value={"status": status_value})
-
-    exc = await _not_admissible_error(db, "rsvp-1", "evt-1", "jwt")
+    # they are — the generic RPC raise is the same for all of them.
+    exc = _not_admissible(status_value)
 
     assert exc.status_code == 409
-    assert fragment in str(exc.detail)
+    assert exc.code == code
+    assert fragment in exc.message
 
 
-@pytest.mark.asyncio
-async def test_rejected_scan_with_a_vanished_rsvp_still_answers() -> None:
-    db = MagicMock()
-    db.get_rsvp_by_id = AsyncMock(return_value=None)
-
-    exc = await _not_admissible_error(db, "rsvp-1", "evt-1", "jwt")
-
-    assert exc.status_code == 409
+def test_an_unknown_status_is_still_refused() -> None:
+    assert _not_admissible("").status_code == 409
