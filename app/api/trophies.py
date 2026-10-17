@@ -1,6 +1,5 @@
 """Trophy and check-in endpoints."""
 
-import logging
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
@@ -8,47 +7,27 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.api.deps import DbServiceDep, get_current_user_with_token
 from app.core.config import settings
+from app.core.errors import ApiError
 from app.core.geo import haversine_meters
 from app.core.limiter import limiter
 from app.models.schemas import CheckInRequest, TrophyRead
+from app.services.checkin_service import (
+    TrophyUnavailable,
+    parse_dt,
+    checkin_method,
+    event_trophy_template,
+    sign_icons,
+    trophy_read,
+)
 from app.services.checkin_window import checkin_state, refusal_detail
-from app.services.db_service import DBService, UniqueViolationError
-from app.services.trophies import default_trophy_name
-
-logger = logging.getLogger(__name__)
+from app.services.db_service import UniqueViolationError
 
 router = APIRouter(prefix="/trophies", tags=["trophies"])
 
 # What check-in reads from the event: no `select=*`, the row carries a 1536-d embedding.
 _CHECKIN_COLUMNS = (
-    "id,kind,title,lat,long,event_date,ends_at,checkin_opens_at,checkin_closed_at,opening_hours"
+    "id,kind,source,title,lat,long,event_date,ends_at,checkin_opens_at,checkin_closed_at,opening_hours"
 )
-
-
-async def _sign_icons(db: DBService, icons: list[str | None]) -> dict[str, str]:
-    """Icons are private Storage paths: the app gets short-lived signed URLs.
-
-    Best-effort: a Storage failure must not fail a check-in already saved nor the
-    whole trophy shelf; the app falls back to the Flyer icon.
-    """
-    paths = sorted({i for i in icons if i})
-    if not paths:
-        return {}
-    try:
-        return await db.sign_media_paths(paths)
-    except Exception:
-        logger.exception("Trophy icon signing failed (%d paths)", len(paths))
-        return {}
-
-
-def _parse_dt(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return None
 
 
 @router.post("/checkin", response_model=TrophyRead, status_code=status.HTTP_201_CREATED)
@@ -63,6 +42,14 @@ async def check_in_trophy(
     event = await db.get_event_by_id(body.event_id, jwt, select=_CHECKIN_COLUMNS)
     if not event or event.get("lat") is None or event.get("long") is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evento não encontrado.")
+    # GPS check-in is for places only (decisions 2026-10-17).
+    method = checkin_method(event)
+    if method == "qr":
+        raise ApiError(
+            409, "checkin_by_qr", "Neste evento, o check-in é feito na entrada: mostre seu ingresso."
+        )
+    if method == "none":
+        raise ApiError(409, "checkin_unavailable", "Este evento é só informativo: não tem check-in.")
     distance = haversine_meters(body.lat, body.long, float(event["lat"]), float(event["long"]))
     if distance > settings.CHECKIN_MAX_DISTANCE_METERS:
         raise HTTPException(
@@ -80,38 +67,23 @@ async def check_in_trophy(
 
     # Every event gives a trophy (decision 2026-10-12): without a custom one, the
     # default is created on the first check-in.
-    template = await db.get_trophy_template_by_event(body.event_id)
-    if not template:
-        template = await db.ensure_default_trophy_template(
-            body.event_id, default_trophy_name(str(event.get("title") or "evento"))
-        )
-    if not template:
+    try:
+        template = await event_trophy_template(db, {**event, "id": body.event_id})
+    except TrophyUnavailable:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Não foi possível preparar o troféu deste evento.",
-        )
-    template_id = str(template["id"])
+        ) from None
 
     try:
-        trophy_row = await db.insert_trophy(user_id, template_id, jwt)
+        trophy_row = await db.insert_trophy(user_id, str(template["id"]), jwt)
     except UniqueViolationError:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Troféu já resgatado.",
         ) from None
 
-    icon = template.get("icon_url")
-    # A path that could not be signed is never sent: it is private and useless to the app.
-    icon_url = (await _sign_icons(db, [icon])).get(icon) if icon else None
-
-    return TrophyRead(
-        id=str(trophy_row.get("id", "")),
-        template_id=template_id,
-        name=str(template.get("name") or ""),
-        description=template.get("description"),
-        icon_url=icon_url,
-        acquired_at=_parse_dt(trophy_row.get("acquired_at")),
-    )
+    return await trophy_read(db, template, trophy_row)
 
 
 @router.get("/", response_model=list[TrophyRead])
@@ -130,7 +102,7 @@ async def list_user_trophies(
         if isinstance(tpl, list):
             tpl = tpl[0] if tpl else {}
         templates.append(tpl)
-    signed = await _sign_icons(db, [t.get("icon_url") for t in templates])
+    signed = await sign_icons(db, [t.get("icon_url") for t in templates])
     out: list[TrophyRead] = []
     for row, tpl in zip(rows, templates, strict=True):
         icon = tpl.get("icon_url")
@@ -141,7 +113,7 @@ async def list_user_trophies(
                 name=str(tpl.get("name", "")),
                 description=tpl.get("description"),
                 icon_url=signed.get(icon) if icon else None,
-                acquired_at=_parse_dt(row.get("acquired_at")),
+                acquired_at=parse_dt(row.get("acquired_at")),
             )
         )
     return out

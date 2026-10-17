@@ -7,13 +7,14 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi.middleware import SlowAPIMiddleware
 
-from app.api import admin, auth, chat, events, plans, rsvp, social, telemetry, trophies
+from app.api import admin, auth, chat, events, plans, realtime, rsvp, social, telemetry, trophies
 from app.core.config import settings
 from app.core.errors import install_error_handlers
 from app.core.limiter import limiter
 from app.core.log_config import configure_logging
 from app.core.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
 from app.services import error_log
+from app.services import realtime as realtime_service
 from app.services.tracing import log_tracing_status
 
 configure_logging()
@@ -28,7 +29,9 @@ async def lifespan(app: FastAPI):
         timeout=httpx.Timeout(30.0),
     )
     error_log.set_client(app.state.http_client)
+    realtime_service.set_client(app.state.http_client)
     yield
+    realtime_service.set_client(None)
     error_log.set_client(None)
     await app.state.http_client.aclose()
 
@@ -65,6 +68,7 @@ app.include_router(plans.router)
 app.include_router(social.router)
 app.include_router(trophies.router)
 app.include_router(telemetry.router)
+app.include_router(realtime.router)
 app.include_router(admin.router)
 
 

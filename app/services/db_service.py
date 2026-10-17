@@ -802,6 +802,24 @@ class DBService:
             return data
         return {}
 
+    async def get_user_trophy_for_template(
+        self, user_id: str, template_id: str
+    ) -> dict[str, Any] | None:
+        """The trophy ``user_id`` already has from ``template_id``, if any."""
+        r = await self._client.get(
+            f"{REST_PREFIX}/trophies",
+            params={
+                "user_id": f"eq.{user_id}",
+                "template_id": f"eq.{template_id}",
+                "select": "id,acquired_at",
+                "limit": "1",
+            },
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        return rows[0] if isinstance(rows, list) and rows else None
+
     async def create_follow(
         self,
         follower_id: str,
