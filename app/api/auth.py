@@ -33,7 +33,7 @@ from app.api.deps import (
     remember_verified_session,
 )
 from app.core.br_documents import mask_cpf, mask_phone
-from app.core.errors import ApiError, session_invalid
+from app.core.errors import SESSION_INVALID_MESSAGE, ApiError, session_invalid
 from app.core.limiter import limiter
 from app.models.schemas import (
     EmailCodeIn,
@@ -114,12 +114,12 @@ async def signup(request: Request, body: SignupIn, db: DbServiceDep) -> SignupOu
         code = exc.response.status_code
         if code == status.HTTP_429_TOO_MANY_REQUESTS:
             raise HTTPException(
-                status_code=code, detail="Muitos pedidos seguidos. Espera um minuto e tenta outra vez."
+                status_code=code, detail="Muitas tentativas seguidas. Aguarde um minuto e tente de novo."
             ) from None
         if code in (400, 422):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Não foi possível criar a conta: verifica o e-mail e a senha.",
+                detail="Não foi possível criar a conta: verifique o e-mail e a senha.",
             ) from None
         # Two sign-ups with the same CPF or phone at once: the unique index stops the
         # second inside Supabase ("Database error saving new user").
@@ -143,8 +143,8 @@ async def activate_signup(
     if not await db.consume_signup_ticket(user_id, _ticket_hash(body.ticket)):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Este código não foi pedido aqui. Abre-o no navegador onde fizeste o cadastro, "
-            "ou faz o cadastro outra vez.",
+            detail="Este código não foi pedido aqui. Digite o código no navegador em que você fez o cadastro, "
+            "ou faça o cadastro de novo.",
         )
     await db.activate_signup(user_id)
     remember_complete_profile(user_id)
@@ -182,7 +182,7 @@ async def complete_profile(
     if not await db.complete_profile_identity(user_id, body.cpf, body.phone):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="O cadastro já está completo: o CPF não se muda por aqui.",
+            detail="O cadastro já está completo: o CPF não pode ser alterado por aqui.",
         )
     remember_complete_profile(user_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -200,7 +200,7 @@ def _require_code_session(session: PendingSession) -> tuple[str, str]:
     if not session.email or not session.session_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Sessão inválida: entra outra vez.",
+            detail=SESSION_INVALID_MESSAGE,
         )
     return session.email, session.session_id
 
@@ -236,7 +236,7 @@ async def send_email_code(request: Request, session: PendingDep, db: DbServiceDe
             raise ApiError(
                 code,
                 "email_code_recently_sent",
-                "Já enviámos um código há menos de 1 minuto. Espera um pouco e pede outro.",
+                "Já enviamos um código há menos de 1 minuto. Aguarde um pouco e peça outro.",
             ) from None
         if code in (400, 404, 422):
             raise session_invalid() from None

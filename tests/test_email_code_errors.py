@@ -67,7 +67,7 @@ def test_an_account_that_no_longer_exists_is_a_401(db: MagicMock, status: int) -
     assert response.status_code == 401
     body = response.json()
     assert body["code"] == "session_invalid"
-    assert body["detail"] == "Sessão inválida: entra outra vez."
+    assert body["detail"] == "Sessão inválida: entre novamente."
 
 
 def test_other_supabase_failures_stay_a_500_with_a_reference(db: MagicMock) -> None:

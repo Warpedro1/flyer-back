@@ -144,7 +144,7 @@ async def discover_events(
     user_id, jwt = auth
     profile = await db.get_profile(user_id, jwt)
     if not profile:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Perfil não encontrado.")
     personal = parse_interest_embedding(profile.get("interest_embedding"))
     if personal is None or len(personal) != EMBEDDING_DIMENSIONS:
         # Lazy backfill: rebuild the vector from stored onboarding preferences when we can,
@@ -312,7 +312,7 @@ async def create_event(
     if not occurrences:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Recurrence produced no occurrences.",
+            detail="A recorrência não gerou nenhuma data.",
         )
     event_rows = [{**base_payload, **_schedule(body, occ)} for occ in occurrences]
 
@@ -320,7 +320,7 @@ async def create_event(
     if not created:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not create event.",
+            detail="Não foi possível criar o evento. Tente de novo.",
         )
     all_ids = [str(r["id"]) for r in created if r.get("id")]
 
@@ -350,7 +350,7 @@ async def create_event(
         await db.delete_events(all_ids, user_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Não foi possível criar o evento. Tenta outra vez.",
+            detail="Não foi possível criar o evento. Tente de novo.",
         ) from None
 
     await _embed_events_best_effort(db, all_ids, body)
@@ -456,7 +456,7 @@ async def get_event(
     user_id, jwt = auth
     row = await db.get_event_by_id(event_id, jwt)
     if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evento não encontrado.")
     media_map = await db.batch_fetch_event_media([event_id], jwt)
     media = media_map.get(event_id, [])
     capacity_state = await _capacity_state(db, event_id, user_id, jwt, row)
@@ -583,7 +583,7 @@ async def _set_checkin(
         if ends_at is None or ends_at <= now:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="O evento já terminou: muda a hora de fim para voltar a abrir o check-in.",
+                detail="O evento já terminou: altere o horário de término para reabrir o check-in.",
             )
         payload: dict[str, Any] = {"checkin_opens_at": now.isoformat(), "checkin_closed_at": None}
     else:

@@ -38,7 +38,7 @@ EVENT = {
 }
 NEAR = {"event_id": "evt-1", "lat": -8.06, "long": -34.87}
 VEC = [0.1] * 1536
-TEMPLATE = {"id": "tpl-1", "name": "Frevo!", "description": "Dançaste", "icon_url": "user-1/icon.png"}
+TEMPLATE = {"id": "tpl-1", "name": "Frevo!", "description": "Dançou muito", "icon_url": "user-1/icon.png"}
 # Start and end are required to create an event (decision 2026-10-12).
 WHEN = {"event_date": "2026-10-16T20:00:00", "ends_at": "2026-10-16T23:00:00"}
 
@@ -248,14 +248,14 @@ def _create(body: dict[str, Any]) -> httpx.Response:
 
 def test_a_custom_trophy_is_created_for_every_occurrence(db: MagicMock) -> None:
     response = _create(
-        {"trophy": {"name": "Aluno dedicado", "description": "Foste à aula", "icon_url": "user-1/trofeu.png"}}
+        {"trophy": {"name": "Aluno dedicado", "description": "Foi à aula", "icon_url": "user-1/trofeu.png"}}
     )
 
     assert response.status_code == 201
     rows = db.create_trophy_templates.await_args.args[0]
     assert rows == [
-        {"event_id": "evt-a", "name": "Aluno dedicado", "description": "Foste à aula", "icon_url": "user-1/trofeu.png"},
-        {"event_id": "evt-b", "name": "Aluno dedicado", "description": "Foste à aula", "icon_url": "user-1/trofeu.png"},
+        {"event_id": "evt-a", "name": "Aluno dedicado", "description": "Foi à aula", "icon_url": "user-1/trofeu.png"},
+        {"event_id": "evt-b", "name": "Aluno dedicado", "description": "Foi à aula", "icon_url": "user-1/trofeu.png"},
     ]
 
 

@@ -148,7 +148,7 @@ async def test_events_are_linked_to_the_matching_place_nearby() -> None:
     )
     db.link_event_to_place = AsyncMock(return_value=True)
 
-    linked = await link_events_to_places(db, [_event(1), _event(2, location_name="Outro sítio"), _place()])
+    linked = await link_events_to_places(db, [_event(1), _event(2, location_name="Outro lugar"), _place()])
 
     assert linked == 1
     db.link_event_to_place.assert_awaited_once_with("sympla", "s1", "place-1")

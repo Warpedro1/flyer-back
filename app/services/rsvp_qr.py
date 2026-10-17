@@ -38,7 +38,7 @@ def _require_secret() -> str:
     if not secret:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Check-in por QR está desligado (RSVP_QR_SECRET não definido).",
+            detail="Check-in por QR está desativado (RSVP_QR_SECRET não definido).",
         )
     return secret
 
@@ -76,7 +76,7 @@ def verify_token(token: str, event_id: str) -> QrClaims:
     except pyjwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="QR expirado. Pede um novo ao participante.",
+            detail="QR expirado. Peça um novo ao participante.",
         ) from None
     except pyjwt.InvalidTokenError:
         raise HTTPException(

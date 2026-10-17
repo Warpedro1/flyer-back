@@ -174,7 +174,7 @@ async def join_event(
     if row is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Não foi possível registar a inscrição.",
+            detail="Não foi possível registrar a inscrição.",
         )
     return await _with_ahead_count(db, row, jwt)
 
