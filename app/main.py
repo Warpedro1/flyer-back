@@ -14,8 +14,10 @@ from app.core.limiter import limiter
 from app.core.log_config import configure_logging
 from app.core.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
 from app.services import error_log
+from app.services.tracing import log_tracing_status
 
 configure_logging()
+log_tracing_status()
 
 
 @asynccontextmanager
