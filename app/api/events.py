@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from app.api.authz import (
     require_event_creator,
@@ -26,6 +26,9 @@ from app.models.schemas import (
     EventMediaRead,
     EventRead,
     EventUpdate,
+    MyEventsRole,
+    MyEventsWhen,
+    MyRsvpRead,
     RsvpStatus,
     TrophyEditRead,
     _EventFields,
@@ -363,24 +366,60 @@ async def create_event(
     return _row_to_event_read(first, media_map.get(first_id, []))
 
 
+def _my_events_order(rows: list[dict[str, Any]], when: MyEventsWhen | None) -> list[dict[str, Any]]:
+    """By date: soonest first, or latest first for past events; undated last."""
+    sign = -1 if when == "past" else 1
+
+    def key(row: dict[str, Any]) -> tuple[bool, float]:
+        start = parse_aware(row.get("event_date"))
+        return (start is None, sign * start.timestamp() if start else 0.0)
+
+    return sorted(rows, key=key)
+
+
 @router.get("/mine", response_model=list[EventRead])
 @limiter.limit("20/minute")
 async def list_my_events(
     request: Request,
     db: DbServiceDep,
     auth: Annotated[tuple[str, str], Depends(get_current_user_with_token)],
+    role: MyEventsRole = "created",
+    when: MyEventsWhen | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1000),
 ) -> list[EventRead]:
-    """Return events created by the authenticated user."""
+    """"Meus eventos" (#40): what you created, what you are going to (`role=going`,
+    with your RSVP), or both (`role=all`, each event once), optionally only upcoming or
+    past events. Without parameters, what you created, newest first, as before."""
     user_id, jwt = auth
-    rows = await db.get_events_by_creator(user_id, jwt)
+    if role == "created" and when is None:
+        rows = await db.get_events_by_creator(user_id, jwt, limit=limit, offset=offset, when=None)
+    else:
+        # Both sources are sorted the same way, so the first `offset + limit` of each
+        # hold the page of the merged list.
+        wanted = offset + limit
+        by_id: dict[str, dict[str, Any]] = {}
+        if role in ("created", "all"):
+            created = await db.get_events_by_creator(user_id, jwt, limit=wanted, offset=0, when=when)
+            by_id.update({str(r["id"]): r for r in created if r.get("id")})
+        if role in ("going", "all"):
+            for row in await db.get_events_going(user_id, jwt, when=when, limit=wanted):
+                by_id[str(row["id"])] = {**by_id.get(str(row["id"]), {}), **row}
+        rows = _my_events_order(list(by_id.values()), when)[offset:wanted]
     if not rows:
         return []
     event_ids = [str(r["id"]) for r in rows if r.get("id")]
     media_map = await db.batch_fetch_event_media(event_ids, jwt)
-    return [
-        _row_to_event_read(row, media_map.get(str(row["id"]), []))
-        for row in rows
-    ]
+    out: list[EventRead] = []
+    for row in rows:
+        event = _row_to_event_read(row, media_map.get(str(row["id"]), []))
+        rsvp = row.get("_rsvp")
+        if isinstance(rsvp, dict) and rsvp.get("status"):
+            event.my_rsvp = MyRsvpRead(
+                status=RsvpStatus(str(rsvp["status"])), waitlist_position=rsvp.get("waitlist_position")
+            )
+        out.append(event)
+    return out
 
 
 @router.get("/{place_id}/events", response_model=list[EventRead])
