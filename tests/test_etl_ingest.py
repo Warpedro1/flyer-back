@@ -25,6 +25,7 @@ from app.services.etl.apify import fetch_dataset_items, start_run
 from app.services.etl.pipeline import ingest_dataset
 from app.services.etl.schemas import IngestionReport
 from app.services.etl.sources import SOURCES
+from app.services.event_keywords import ReprocessResult
 
 ADMIN = "admin-token-for-tests"
 HOOK = "webhook-secret-for-tests"
@@ -93,10 +94,12 @@ async def test_ingest_dataset_transforms_loads_and_links() -> None:
         patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=[good, bad])),
         patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=1)) as upsert,
         patch("app.services.etl.pipeline.link_events_to_places", AsyncMock(return_value=0)) as link,
+        patch("app.services.etl.pipeline.reprocess_stale", AsyncMock(return_value=ReprocessResult(0, 0, 0))),
     ):
         report = await ingest_dataset(db, http, SOURCES["google_maps"], "ds-1", "tok")
 
     assert (report.fetched, report.standardized, report.upserted) == (2, 1, 1)
+    assert report.errors == []
     assert [e.source_event_id for e in upsert.await_args.args[1]] == ["p1"]
     link.assert_awaited_once()
 

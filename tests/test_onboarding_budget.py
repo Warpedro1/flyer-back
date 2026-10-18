@@ -3,10 +3,11 @@
 * Moderation used ``text-moderation-latest``, which OpenAI shut down (2025-10-27):
   every onboarding ended in 503 ``moderation_unavailable``. The model is now a
   setting (``omni-moderation-latest``) and failures are recorded, not swallowed.
-* Time: moderation, LLM judge, extraction and embeddings must fit the 60 s of a
-  Vercel function. Each has its own limit (retries included), and their sum stays
-  under ``ONBOARDING_BUDGET_SECONDS``. A slow judge or extraction lets the
-  onboarding go on with what it has instead of failing.
+* Time: moderation, LLM judge, the taste agent's analysts and synthesizer (#31) and
+  the embeddings must fit the 60 s of a Vercel function. Each has its own limit
+  (retries included), and their sum stays under ``ONBOARDING_BUDGET_SECONDS``. A
+  slow judge, analyst or synthesizer lets the onboarding go on with what it has
+  instead of failing.
 * Errors outside any ``try`` (the judge's constructor, the profile writes) became a
   500 without CORS; they now answer a stable code.
 """
@@ -18,16 +19,24 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.documents import Document
 
 from app.core.config import settings
 from app.core.errors import ApiError
 from app.data.onboarding_guide import GUIDE_STEP_KEYS
-from app.services import onboarding_guard, taste_extraction
+from app.services import onboarding_guard, taste_agent
 from app.services.ai_service import ai_service
 from app.services.onboarding_guard import GuardResult
 from app.services.onboarding_pipeline import run_complete_onboarding_pipeline
-from app.services.taste_extraction import StepQA, extract_tastes_per_step
+from app.services.taste_agent import (
+    AnswerAnalysis,
+    PersonTaste,
+    StepQA,
+    StepTaste,
+    WeightedKeyword,
+    analyze_answers,
+    analyze_person,
+    step_documents,
+)
 
 
 def test_the_default_limits_fit_the_budget() -> None:
@@ -35,6 +44,7 @@ def test_the_default_limits_fit_the_budget() -> None:
         settings.MODERATION_TIMEOUT_SECONDS
         + settings.GUARD_JUDGE_TIMEOUT_SECONDS
         + settings.TASTE_EXTRACT_TIMEOUT_SECONDS
+        + settings.TASTE_SYNTH_TIMEOUT_SECONDS
         + settings.EMBEDDING_TIMEOUT_SECONDS
     )
     assert total <= settings.ONBOARDING_BUDGET_SECONDS < 60
@@ -100,7 +110,7 @@ async def test_the_onboarding_embeddings_have_a_timeout() -> None:
     many = AsyncMock(return_value=[[0.1] * 3] * 6)
     with (
         patch("app.services.onboarding_pipeline.run_onboarding_guard", AsyncMock(return_value=GuardResult(ok=True))),
-        patch("app.services.onboarding_pipeline.extract_tastes_per_step", AsyncMock(return_value=_docs())),
+        patch("app.services.onboarding_pipeline.analyze_person", AsyncMock(return_value=_person())),
         patch.object(ai_service, "generate_embedding", one),
         patch.object(ai_service, "generate_embeddings", many),
     ):
@@ -147,33 +157,53 @@ async def test_a_judge_that_cannot_be_built_is_unavailable_not_a_crash() -> None
 # -------------------------------------------------------------- extraction --
 
 
-async def test_a_slow_extraction_step_uses_the_short_document(monkeypatch: pytest.MonkeyPatch) -> None:
+class _Slow:
+    """A runnable that answers after ``seconds`` (the limit is the caller's)."""
+
+    def __init__(self, seconds: float, out: Any = None) -> None:
+        self.seconds, self.out = seconds, out
+
+    async def ainvoke(self, *_: Any) -> Any:
+        await asyncio.sleep(self.seconds)
+        return self.out
+
+
+async def test_a_slow_analyst_leaves_the_answer_raw(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "TASTE_EXTRACT_TIMEOUT_SECONDS", 0.05)
-    long_answer = "Gosto muito de frevo, de maracatu e de passar o domingo na praia de Boa Viagem."
+    monkeypatch.setattr(taste_agent, "_structured", lambda *_: _Slow(1))
+    answer = "Gosto muito de frevo, de maracatu e de passar o domingo na praia de Boa Viagem."
 
-    async def slow(_: StepQA) -> Any:
-        await asyncio.sleep(1)
+    steps = await analyze_answers([StepQA("music", "Que música?", answer)])
 
-    with patch.object(taste_extraction, "_extract_elaborate", slow):
-        docs = await extract_tastes_per_step([StepQA("music", "Que música?", long_answer)])
-
-    assert [d.metadata["extraction"] for d in docs] == ["short"]
+    assert steps[0].analysis is None
+    assert [d.metadata["extraction"] for d in step_documents(steps)] == ["short"]
 
 
-async def test_all_steps_are_extracted_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Six steps that each take the whole limit must not take six times the limit.
+async def test_all_answers_are_analysed_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Six answers that each take the whole limit must not take six times the limit.
     monkeypatch.setattr(settings, "TASTE_EXTRACT_TIMEOUT_SECONDS", 0.3)
-    answer = "Uma resposta suficientemente longa para ir ao extrator de gostos do onboarding."
-
-    async def slow(_: StepQA) -> Any:
-        await asyncio.sleep(1)
+    monkeypatch.setattr(taste_agent, "_structured", lambda *_: _Slow(1))
 
     loop = asyncio.get_running_loop()
     start = loop.time()
-    with patch.object(taste_extraction, "_extract_elaborate", slow):
-        await extract_tastes_per_step([StepQA(f"s{i}", "P?", answer) for i in range(6)])
+    await analyze_answers([StepQA(f"s{i}", "P?", "frevo") for i in range(6)])
 
     assert loop.time() - start < 0.9
+
+
+async def test_a_slow_synthesizer_falls_back_to_merging(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "TASTE_SYNTH_TIMEOUT_SECONDS", 0.05)
+    analysis = AnswerAnalysis(keywords=[WeightedKeyword(term="Frevo", weight=3)], summary="Gosta de frevo.")
+
+    def runnable(schema: Any, _: float) -> _Slow:
+        return _Slow(0, analysis) if schema is AnswerAnalysis else _Slow(1)
+
+    monkeypatch.setattr(taste_agent, "_structured", runnable)
+
+    person = await analyze_person([StepQA("music", "Que música?", "frevo")])
+
+    assert person.mode == "merged"
+    assert person.taste is not None and person.taste.keywords == ("frevo",)
 
 
 # ------------------------------------------------------------ profile writes --
@@ -183,8 +213,9 @@ def _answers() -> dict[str, str]:
     return {k: f"Resposta elaborada para {k} com mais de quarenta caracteres mínimos." for k in GUIDE_STEP_KEYS}
 
 
-def _docs() -> list[Document]:
-    return [Document(page_content=f"doc {k}", metadata={"step_key": k}) for k in GUIDE_STEP_KEYS]
+def _person() -> PersonTaste:
+    steps = [StepTaste(StepQA(k, "P?", f"resposta {k}"), None) for k in GUIDE_STEP_KEYS]
+    return PersonTaste(steps, None, "raw")
 
 
 async def test_a_profile_that_cannot_be_read_is_a_clear_error() -> None:
@@ -205,7 +236,7 @@ async def test_a_profile_that_cannot_be_saved_is_a_clear_error() -> None:
     db.update_profile = AsyncMock(side_effect=RuntimeError("supabase down"))
     with (
         patch("app.services.onboarding_pipeline.run_onboarding_guard", AsyncMock(return_value=GuardResult(ok=True))),
-        patch("app.services.onboarding_pipeline.extract_tastes_per_step", AsyncMock(return_value=_docs())),
+        patch("app.services.onboarding_pipeline.analyze_person", AsyncMock(return_value=_person())),
         patch.object(ai_service, "generate_embedding", AsyncMock(return_value=[0.1] * 3)),
         patch.object(ai_service, "generate_embeddings", AsyncMock(return_value=[[0.1] * 3] * 6)),
         pytest.raises(ApiError) as caught,

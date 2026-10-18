@@ -47,9 +47,10 @@ def _place(**overrides: Any) -> StandardizedEvent:
     return StandardizedEvent(**data)
 
 
-def _db() -> MagicMock:
+def _db(stored: dict[str, dict[str, Any]] | None = None) -> MagicMock:
     db = MagicMock()
     db.upsert_events = AsyncMock(side_effect=lambda rows: len(rows))
+    db.list_source_keywords = AsyncMock(return_value=stored or {})
     return db
 
 

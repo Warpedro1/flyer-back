@@ -3,11 +3,15 @@
 Ingestion runs in two steps because scraping takes minutes and a Vercel function at
 most 60 s: POST /admin/ingest starts the Apify run and returns; when the run ends,
 Apify calls POST /admin/ingest/apify-webhook, which loads that run's dataset.
+
+POST /admin/events/keywords gives the stale events and places keywords and a new
+vector (#22 B), a chunk per call; by default it only estimates the cost.
 """
 
 from __future__ import annotations
 
 import hmac
+from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
@@ -20,6 +24,7 @@ from app.services.etl.apify import start_run
 from app.services.etl.pipeline import ingest_dataset
 from app.services.etl.schemas import IngestionReport
 from app.services.etl.sources import SOURCES
+from app.services.event_keywords import all_stale, estimate_cost, reprocess_stale
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -52,6 +57,42 @@ class ApifyWebhook(BaseModel):
 
     eventType: str | None = None
     resource: ApifyRun
+
+
+class KeywordsRequest(BaseModel):
+    """One call of the keyword reprocessing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Decision 2026-10-18: the owner sees the cost before anything is spent, so the
+    # default is the estimate alone.
+    dry_run: bool = True
+    # Rows tried in this call; what the time budget leaves undone stays stale.
+    limit: int = Field(default=80, ge=1, le=300)
+
+
+class KeywordsEstimate(BaseModel):
+    """Rough cost of the rows still stale (list prices, about 4 characters per token)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: int
+    input_tokens: int
+    output_tokens: int
+    embedding_tokens: int
+    usd: Decimal
+
+
+class KeywordsReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dry_run: bool
+    # Stale rows before this call, and after it.
+    pending: int
+    processed: int = 0
+    failed: int = 0
+    remaining: int
+    estimate: KeywordsEstimate
 
 
 def _require_secret(configured: str, given: str | None, name: str) -> None:
@@ -114,3 +155,39 @@ async def apify_webhook(
     _require_secret(settings.APIFY_WEBHOOK_SECRET, x_apify_webhook_secret, "APIFY_WEBHOOK_SECRET")
     token = _require_apify_token()
     return await ingest_dataset(db, http, SOURCES[source], body.resource.defaultDatasetId, token)
+
+
+@router.post("/events/keywords", response_model=KeywordsReport)
+@limiter.limit("10/minute")
+async def reprocess_keywords(
+    request: Request,
+    db: DbServiceDep,
+    body: KeywordsRequest | None = None,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> KeywordsReport:
+    """Estimate (``dry_run``, the default) or give keywords to the next stale rows.
+
+    Call it again until ``remaining`` is 0; each call fits a 60 s function.
+    """
+    _require_admin(x_admin_token)
+    req = body or KeywordsRequest()
+    stale = await all_stale(db)
+    cost = estimate_cost(stale)
+    estimate = KeywordsEstimate(
+        items=cost.items,
+        input_tokens=cost.input_tokens,
+        output_tokens=cost.output_tokens,
+        embedding_tokens=cost.embedding_tokens,
+        usd=cost.usd,
+    )
+    if req.dry_run:
+        return KeywordsReport(dry_run=True, pending=len(stale), remaining=len(stale), estimate=estimate)
+    done = await reprocess_stale(db, limit=req.limit, budget_seconds=settings.KEYWORDS_BUDGET_SECONDS)
+    return KeywordsReport(
+        dry_run=False,
+        pending=len(stale),
+        processed=done.processed,
+        failed=done.failed,
+        remaining=max(0, len(stale) - done.processed),
+        estimate=estimate,
+    )

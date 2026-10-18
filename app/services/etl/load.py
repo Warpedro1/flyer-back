@@ -1,4 +1,10 @@
-"""Load stage: embed in batches, upsert idempotently, link events to their places."""
+"""Load stage: embed in batches, upsert idempotently, link events to their places.
+
+The vector of a row whose text did not change since its keywords were made is
+rebuilt from those keywords (#22 B), without the LLM; any other row gets the raw
+text, as before, and stays stale (`events.keywords_stale`) until the reprocessing
+gives it keywords.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +16,8 @@ from app.services.ai_service import ai_service
 from app.services.db_service import DBService
 from app.services.etl.schemas import StandardizedEvent
 from app.services.etl.transform import normalize
+from app.services.event_keywords import raw_embedding_text, stored_keywords
+from app.services.taste_agent import event_content_hash, event_embedding_text
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +31,27 @@ _STOPWORDS = frozenset(
 )
 
 
-def _embedding_text(ev: StandardizedEvent) -> str:
-    return " ".join(part for part in (ev.title, ev.description or "", ev.category) if part).strip()
+async def _embedding_texts(db: DBService, events: list[StandardizedEvent]) -> list[str]:
+    """Each row's vector text: its stored keywords when they are still fresh, else the raw text."""
+    stored: dict[tuple[str, str], dict[str, Any]] = {}
+    for source in sorted({ev.source for ev in events}):
+        try:
+            rows = await db.list_source_keywords(source)
+        except Exception:
+            # Not fatal: those rows get the raw text and stay stale until reprocessed.
+            logger.exception("ETL could not read the stored keywords (source=%s)", source)
+            continue
+        stored.update({(source, sid): row for sid, row in rows.items()})
+    texts: list[str] = []
+    for ev in events:
+        row = stored.get((ev.source, ev.source_event_id))
+        fresh = row is not None and row.get("keywords_hash") == event_content_hash(ev.title, ev.description, ev.category)
+        taste = stored_keywords(row) if fresh else None
+        if taste is not None:
+            texts.append(event_embedding_text(ev.title, ev.category, taste))
+        else:
+            texts.append(raw_embedding_text(ev.title, ev.description, ev.category))
+    return texts
 
 
 def _row(ev: StandardizedEvent, embedding: list[float] | None) -> dict[str, Any]:
@@ -54,13 +81,13 @@ def _row(ev: StandardizedEvent, embedding: list[float] | None) -> dict[str, Any]
     }
 
 
-async def _embed(events: list[StandardizedEvent]) -> list[list[float] | None]:
+async def _embed(texts: list[str]) -> list[list[float] | None]:
     """One OpenAI request per batch; a failed batch imports without vectors."""
     out: list[list[float] | None] = []
-    for start in range(0, len(events), EMBED_BATCH):
-        batch = events[start : start + EMBED_BATCH]
+    for start in range(0, len(texts), EMBED_BATCH):
+        batch = texts[start : start + EMBED_BATCH]
         try:
-            vectors = await ai_service.generate_embeddings([_embedding_text(e) for e in batch])
+            vectors = await ai_service.generate_embeddings(batch)
             if len(vectors) != len(batch):
                 raise ValueError(f"expected {len(batch)} vectors, got {len(vectors)}")
             out.extend(vectors)
@@ -75,7 +102,7 @@ async def upsert_events(db: DBService, events: list[StandardizedEvent]) -> int:
     """Embed and upsert (conflict on source + source_event_id); returns rows sent."""
     if not events:
         return 0
-    vectors = await _embed(events)
+    vectors = await _embed(await _embedding_texts(db, events))
     rows = [_row(ev, vec) for ev, vec in zip(events, vectors, strict=True)]
     written = 0
     for start in range(0, len(rows), UPSERT_BATCH):

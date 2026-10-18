@@ -103,18 +103,29 @@ class Settings(BaseSettings):
     # Gates ONLY the optional LLM judge stage; heuristics + moderation always run.
     ENABLE_ONBOARDING_GUARDS: bool = True
     GUARD_JUDGE_MODEL: str = ""
-    TASTE_EXTRACTOR_MODEL: str = ""
+    # Taste agent (#31, decision 2026-10-18): a small model is enough to read answers
+    # and descriptions into keywords. Empty falls back to LLM_MODEL.
+    TASTE_EXTRACTOR_MODEL: str = "gpt-4o-mini"
     GUARD_MAX_INPUT_CHARS: int = Field(default=8000, ge=1000, le=50000)
     ONBOARDING_ANSWER_MAX_CHARS: int = Field(default=400, ge=50, le=2000)
     ONBOARDING_ANSWERS_TOTAL_MAX_CHARS: int = Field(default=2200, ge=200, le=10000)
-    ONBOARDING_ANSWER_ELABORATE_MIN_CHARS: int = Field(default=40, ge=10, le=500)
     # Time limits, retries included (#26). Their sum stays under the budget so the
-    # onboarding fits a 60 s Vercel function; a slow judge or extraction lets it go on.
+    # onboarding fits a 60 s Vercel function; a slow judge, analyst or synthesizer
+    # lets it go on with what it has.
     ONBOARDING_BUDGET_SECONDS: float = 50.0
     MODERATION_TIMEOUT_SECONDS: float = Field(default=8.0, ge=3.0, le=60.0)
-    GUARD_JUDGE_TIMEOUT_SECONDS: float = Field(default=15.0, ge=5.0, le=120.0)
-    TASTE_EXTRACT_TIMEOUT_SECONDS: float = Field(default=15.0, ge=5.0, le=120.0)
+    GUARD_JUDGE_TIMEOUT_SECONDS: float = Field(default=12.0, ge=5.0, le=120.0)
+    # One analyst call per answer, all at once.
+    TASTE_EXTRACT_TIMEOUT_SECONDS: float = Field(default=12.0, ge=5.0, le=120.0)
+    TASTE_SYNTH_TIMEOUT_SECONDS: float = Field(default=8.0, ge=3.0, le=60.0)
     EMBEDDING_TIMEOUT_SECONDS: float = Field(default=8.0, ge=3.0, le=60.0)
+    # Event keywords (#22 B): one call per event or place, inside the create/edit
+    # request; the import and the reprocessing run this many at a time.
+    EVENT_KEYWORDS_TIMEOUT_SECONDS: float = Field(default=12.0, ge=3.0, le=60.0)
+    TASTE_AGENT_CONCURRENCY: int = Field(default=8, ge=1, le=32)
+    # What the import webhook and each reprocessing call may spend on keywords, so
+    # they end inside the 60 s of a Vercel function.
+    KEYWORDS_BUDGET_SECONDS: float = Field(default=35.0, ge=5.0, le=50.0)
     # OpenAI shut down text-moderation-latest on 2025-10-27 (#26).
     MODERATION_MODEL: str = "omni-moderation-latest"
     # Number of per-step taste docs retrieved and injected into the chat system prompt.

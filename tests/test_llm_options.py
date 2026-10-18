@@ -17,8 +17,11 @@ import pytest
 from langchain_openai import ChatOpenAI
 
 from app.core.config import settings
-from app.services import onboarding_guard, taste_extraction
+from app.services import onboarding_guard, taste_agent
 from app.services.llm_options import chat_model_kwargs
+
+# Taken at import, before the autouse fixture swaps it for a runnable that always fails.
+from app.services.taste_agent import _structured as real_structured
 
 
 @pytest.mark.parametrize("model", ["gpt-5-mini", "gpt-5", "gpt-5-nano", "o3-mini", "o4-mini", "o1"])
@@ -64,17 +67,17 @@ def test_the_judge_with_gpt5_sends_no_temperature(monkeypatch: pytest.MonkeyPatc
     assert built["reasoning_effort"] == "minimal"
 
 
-def test_the_extractor_with_gpt5_sends_no_temperature(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_taste_agent_with_gpt5_sends_no_temperature(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "TASTE_EXTRACTOR_MODEL", "gpt-5-mini")
-    monkeypatch.setattr(taste_extraction, "_structured_extractor", None)
+    monkeypatch.setattr(taste_agent, "_runnables", {})
     built: dict[str, Any] = {}
 
     def fake_chat(**kwargs: Any) -> MagicMock:
         built.update(kwargs)
         return MagicMock()
 
-    with patch.object(taste_extraction, "ChatOpenAI", side_effect=fake_chat):
-        taste_extraction._get_structured_extractor()
+    with patch.object(taste_agent, "ChatOpenAI", side_effect=fake_chat):
+        real_structured(taste_agent.AnswerAnalysis, 5.0)
 
     assert built["temperature"] == 1
     assert built["reasoning_effort"] == "minimal"

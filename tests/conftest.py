@@ -39,3 +39,21 @@ def recorded() -> Iterator[list[dict[str, Any]]]:
     error_log.set_client(client)
     yield rows
     error_log.set_client(None)
+
+
+class LLMOffInTests(RuntimeError):
+    """What the taste agent's LLM answers in a test that did not set it up."""
+
+
+class _OffRunnable:
+    async def ainvoke(self, *_: Any, **__: Any) -> Any:
+        raise LLMOffInTests("the taste agent's LLM is off in tests")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never reach OpenAI: the taste agent's runnables fail unless a test sets
+    `taste_agent._structured` itself, so every caller takes its raw-text fallback."""
+    from app.services import taste_agent
+
+    monkeypatch.setattr(taste_agent, "_structured", lambda *_, **__: _OffRunnable())

@@ -1,18 +1,27 @@
-"""Load one finished Apify run: extract its dataset → transform → load → link."""
+"""Load one finished Apify run: extract its dataset → transform → load → link → keywords."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import httpx
 
+from app.core.config import settings
 from app.services.db_service import DBService
 from app.services.etl.apify import fetch_dataset_items
 from app.services.etl.load import link_events_to_places, upsert_events
 from app.services.etl.schemas import IngestionReport, StandardizedEvent
 from app.services.etl.sources import ApifySource
+from app.services.event_keywords import reprocess_stale
 
 logger = logging.getLogger(__name__)
+
+# The webhook runs in a 60 s function: keywords only use what is left of this, so
+# their embeddings and writes still fit after the LLM calls stop.
+_WEBHOOK_SECONDS = 45.0
+_MIN_KEYWORDS_SECONDS = 5.0
+_KEYWORDS_PER_RUN = 200
 
 
 async def ingest_dataset(
@@ -24,6 +33,8 @@ async def ingest_dataset(
 ) -> IngestionReport:
     """Never raises: failures are captured in the report (and logged)."""
     report = IngestionReport(source=source.name)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
 
     try:
         raw = await fetch_dataset_items(http, token, dataset_id)
@@ -50,9 +61,20 @@ async def ingest_dataset(
         logger.exception("ETL load failed (source=%s, dataset=%s)", source.name, dataset_id)
         report.errors.append(f"load: {exc}")
 
+    # Keywords for the stale rows (#22 B) with the time left; the reprocessing
+    # (POST /admin/events/keywords) does the rest.
+    budget = min(settings.KEYWORDS_BUDGET_SECONDS, _WEBHOOK_SECONDS - (loop.time() - started))
+    if budget >= _MIN_KEYWORDS_SECONDS:
+        try:
+            done = await reprocess_stale(db, limit=_KEYWORDS_PER_RUN, budget_seconds=budget)
+            report.keywords = done.processed
+        except Exception as exc:
+            logger.exception("ETL keywords failed (source=%s)", source.name)
+            report.errors.append(f"keywords: {exc}")
+
     logger.info(
-        "ETL run done: source=%s fetched=%d standardized=%d upserted=%d linked=%d errors=%d",
+        "ETL run done: source=%s fetched=%d standardized=%d upserted=%d linked=%d keywords=%d errors=%d",
         report.source, report.fetched, report.standardized, report.upserted, report.linked,
-        len(report.errors),
+        report.keywords, len(report.errors),
     )
     return report
