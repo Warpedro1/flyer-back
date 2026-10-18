@@ -55,6 +55,10 @@ _RPC_ERRORS: dict[str, tuple[int, str]] = {
         status.HTTP_409_CONFLICT,
         "Esta inscrição não pode ser rechamada.",
     ),
+    "rsvp_not_skippable": (
+        status.HTTP_409_CONFLICT,
+        "Só dá para pular a vez de quem já foi chamado.",
+    ),
     "already_admitted": (status.HTTP_409_CONFLICT, "Esta pessoa já entrou."),
     "rsvp_not_admissible": (
         status.HTTP_409_CONFLICT,
@@ -346,6 +350,29 @@ async def recall_attendee(
     user_id, _jwt = auth
     try:
         row = await db.rsvp_recall(event_id, rsvp_id, user_id)
+    except RpcError as exc:
+        raise _http_from_rpc(exc) from None
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Inscrição não encontrada."
+        )
+    return _row_to_rsvp(row)
+
+
+@router.post("/{event_id}/waitlist/{rsvp_id}/skip", response_model=RsvpRead)
+@limiter.limit("30/minute")
+async def skip_attendee(
+    request: Request,
+    event_id: str,
+    rsvp_id: str,
+    db: DbServiceDep,
+    auth: Annotated[tuple[str, str], Depends(get_current_user_with_token)],
+) -> RsvpRead:
+    """Pass the turn of someone called who is not coming (#5): they become `no_show`
+    (`recall` still brings them back) and, with `auto_call_next`, the next is called."""
+    user_id, _jwt = auth
+    try:
+        row = await db.rsvp_skip(event_id, rsvp_id, user_id)
     except RpcError as exc:
         raise _http_from_rpc(exc) from None
     if row is None:

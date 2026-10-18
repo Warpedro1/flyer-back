@@ -1498,6 +1498,16 @@ class DBService:
             {"p_event_id": event_id, "p_rsvp_id": rsvp_id, "p_creator_id": creator_id},
         )
 
+    async def rsvp_skip(
+        self, event_id: str, rsvp_id: str, creator_id: str
+    ) -> dict[str, Any] | None:
+        """Pass the turn of someone already called (#5): `no_show`, and the next in
+        line is called when the event calls automatically."""
+        return await self._call_rsvp_rpc(
+            "rsvp_skip",
+            {"p_event_id": event_id, "p_rsvp_id": rsvp_id, "p_creator_id": creator_id},
+        )
+
     async def rsvp_admit(
         self, rsvp_id: str, event_id: str, jti: str
     ) -> dict[str, Any] | None:
