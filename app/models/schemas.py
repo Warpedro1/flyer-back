@@ -813,6 +813,10 @@ class ProfileIdentityStatus(BaseModel):
     pending: bool = False
     cpf_masked: str | None = None
     phone_masked: str | None = None
+    # Introduction tour (Warpedro1/flyer#23): already finished or skipped, and whether
+    # the chat onboarding was done (the tour ends there otherwise).
+    intro_seen: bool = False
+    onboarded: bool = False
 
 
 class EmailCodeStatus(BaseModel):
