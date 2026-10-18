@@ -114,6 +114,7 @@ async def list_user_trophies(
                 description=tpl.get("description"),
                 icon_url=signed.get(icon) if icon else None,
                 acquired_at=parse_dt(row.get("acquired_at")),
+                event_id=str(tpl["event_id"]) if tpl.get("event_id") else None,
             )
         )
     return out
