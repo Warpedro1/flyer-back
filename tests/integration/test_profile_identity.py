@@ -95,3 +95,12 @@ def test_clients_cannot_call_the_cpf_check(db: Any) -> None:
             "select has_function_privilege(%s, 'public.is_valid_cpf(text)', 'execute')", (role,)
         ).fetchone()[0]
         assert allowed is False
+
+
+def test_many_accounts_without_a_phone(db: Any) -> None:
+    # The phone is optional (#29): the unique index only covers phones that exist.
+    a = _signup(db, "a@example.com", {"cpf": "52998224725"})
+    b = _signup(db, "b@example.com", {"cpf": "11144477735", "phone": ""})
+
+    rows = db.execute("select phone from public.profiles where id in (%s, %s)", (a, b)).fetchall()
+    assert rows == [(None,), (None,)]

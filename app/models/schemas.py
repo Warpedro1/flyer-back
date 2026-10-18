@@ -697,7 +697,10 @@ def _valid_cpf(value: str) -> str:
     return cpf
 
 
-def _valid_phone(value: str) -> str:
+def _valid_phone(value: str | None) -> str | None:
+    """Optional (#29, 2026-10-17); a phone given is still a Brazilian mobile."""
+    if value is None or not value.strip():
+        return None
     phone = normalize_phone(value)
     if phone is None:
         raise ValueError("Celular inválido: use DDD + número com 9 dígitos.")
@@ -705,14 +708,15 @@ def _valid_phone(value: str) -> str:
 
 
 class SignupIn(BaseModel):
-    """Sign-up by e-mail (decisions 2026-10-12): CPF, phone and e-mail are unique."""
+    """Sign-up by e-mail (decisions 2026-10-12): CPF, phone and e-mail are unique.
+    The phone is optional (#29)."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=100)
     email: str = Field(max_length=254)
     cpf: str = Field(max_length=20)
-    phone: str = Field(max_length=25)
+    phone: str | None = Field(default=None, max_length=25)
     password: str = Field(max_length=72)
 
     @field_validator("name")
@@ -738,7 +742,7 @@ class SignupIn(BaseModel):
 
     @field_validator("phone")
     @classmethod
-    def _phone(cls, v: str) -> str:
+    def _phone(cls, v: str | None) -> str | None:
         return _valid_phone(v)
 
     @field_validator("password")
@@ -748,12 +752,12 @@ class SignupIn(BaseModel):
 
 
 class ProfileIdentityIn(BaseModel):
-    """CPF and phone for an account that has none yet (Google, first access)."""
+    """CPF, and optionally a phone, for an account that has none yet (Google, first access)."""
 
     model_config = ConfigDict(extra="forbid")
 
     cpf: str = Field(max_length=20)
-    phone: str = Field(max_length=25)
+    phone: str | None = Field(default=None, max_length=25)
 
     @field_validator("cpf")
     @classmethod
@@ -762,7 +766,7 @@ class ProfileIdentityIn(BaseModel):
 
     @field_validator("phone")
     @classmethod
-    def _phone(cls, v: str) -> str:
+    def _phone(cls, v: str | None) -> str | None:
         return _valid_phone(v)
 
 
@@ -781,8 +785,8 @@ class SignupActivateIn(BaseModel):
 
 
 class ProfileIdentityStatus(BaseModel):
-    """Whether the account has CPF and phone (the owner's own, masked) and whether its
-    sign-up still waits for the code."""
+    """Whether the account has its CPF (the phone is optional, #29), the owner's own
+    CPF and phone masked, and whether its sign-up still waits for the code."""
 
     model_config = ConfigDict(extra="forbid")
 

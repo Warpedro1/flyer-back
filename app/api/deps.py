@@ -44,8 +44,8 @@ _VERIFIED_CACHE_SIZE = 10_000
 _verified_sessions: "OrderedDict[str, None]" = OrderedDict()
 
 
-# Active accounts with CPF and phone (never removed: CPF cannot be unset and an
-# activated sign-up does not go back to pending).
+# Active accounts with a CPF (the phone is optional, #29). Never removed: the CPF
+# cannot be unset and an activated sign-up does not go back to pending.
 _complete_profiles: "OrderedDict[str, None]" = OrderedDict()
 
 
@@ -82,7 +82,7 @@ async def _session_verified(request: Request, session_id: str) -> bool:
 
 
 async def _account_state(request: Request, user_id: str) -> str:
-    """`ok`, `incomplete` (no CPF/phone) or `pending` (sign-up without its code)."""
+    """`ok`, `incomplete` (no CPF) or `pending` (sign-up without its code)."""
     if user_id in _complete_profiles:
         return "ok"
     client = getattr(request.app.state, "http_client", None)
@@ -102,7 +102,8 @@ async def _authenticated_payload(
     2. A sign-up by e-mail only counts once its code was entered in the browser that
        signed up (ticket, decision 2026-10-14): a Supabase session opened with the
        code alone, by whoever got the e-mail by mistake, stays out.
-    3. Every account needs CPF and phone (Google ones complete them on first access).
+    3. Every account needs a CPF; the phone is optional (#29). Google accounts
+       complete it on first access.
 
     Enforced here and not in the app: whoever has a token can call the API directly
     and skip any screen.
