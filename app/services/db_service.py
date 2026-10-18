@@ -273,8 +273,10 @@ class DBService:
     # ------------------------------------------------ account: CPF and phone --
 
     @staticmethod
-    def _identity_filter(email: str | None, cpf: str, phone: str) -> str:
-        filters = [f"cpf.eq.{cpf}", f"phone.eq.{phone}"]
+    def _identity_filter(email: str | None, cpf: str, phone: str | None) -> str:
+        filters = [f"cpf.eq.{cpf}"]
+        if phone:
+            filters.append(f"phone.eq.{phone}")
         if email:
             filters.append(f"email.eq.{email}")
         return f"({','.join(filters)})"
@@ -284,7 +286,7 @@ class DBService:
         *,
         email: str | None,
         cpf: str,
-        phone: str,
+        phone: str | None,
         exclude_user_id: str | None = None,
         active_only: bool = False,
     ) -> set[str]:
@@ -311,13 +313,13 @@ class DBService:
         for row in rows if isinstance(rows, list) else []:
             if row.get("cpf") == cpf:
                 taken.add("cpf")
-            if row.get("phone") == phone:
+            if phone and row.get("phone") == phone:
                 taken.add("phone")
             if email and str(row.get("email") or "").lower() == email:
                 taken.add("email")
         return taken
 
-    async def find_pending_signups(self, *, email: str | None, cpf: str, phone: str) -> list[str]:
+    async def find_pending_signups(self, *, email: str | None, cpf: str, phone: str | None) -> list[str]:
         """Ids of sign-ups still waiting for their code that use this e-mail, CPF or phone."""
         r = await self._client.get(
             f"{REST_PREFIX}/profiles",
@@ -348,20 +350,23 @@ class DBService:
         return {"cpf": None, "phone": None, "signup_pending": False}
 
     async def get_account_state(self, user_id: str) -> str:
-        """`pending` (sign-up without its code), `incomplete` (no CPF/phone) or `ok`."""
+        """`pending` (sign-up without its code), `incomplete` (no CPF) or `ok`.
+
+        The phone is optional (#29, 2026-10-17)."""
         identity = await self.get_profile_identity(user_id)
         if identity.get("signup_pending"):
             return "pending"
-        if not identity.get("cpf") or not identity.get("phone"):
+        if not identity.get("cpf"):
             return "incomplete"
         return "ok"
 
-    async def complete_profile_identity(self, user_id: str, cpf: str, phone: str) -> bool:
-        """Set CPF and phone once. False when the account already had a CPF."""
+    async def complete_profile_identity(self, user_id: str, cpf: str, phone: str | None) -> bool:
+        """Set the CPF (and the phone, when given) once. False when the account already
+        had a CPF."""
         r = await self._client.patch(
             f"{REST_PREFIX}/profiles",
             params={"id": f"eq.{user_id}", "cpf": "is.null"},
-            json={"cpf": cpf, "phone": phone},
+            json={"cpf": cpf, **({"phone": phone} if phone else {})},
             headers={**self._admin_headers(), "Prefer": "return=representation"},
         )
         await self._raise_for_supabase(r)

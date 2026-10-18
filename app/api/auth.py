@@ -70,7 +70,7 @@ def _ticket_hash(ticket: str) -> str:
 
 
 async def _claim_identity(
-    db: DbServiceDep, *, email: str | None, cpf: str, phone: str, exclude_user_id: str | None = None
+    db: DbServiceDep, *, email: str | None, cpf: str, phone: str | None, exclude_user_id: str | None = None
 ) -> None:
     """409 if an active account has them; sign-ups still waiting for their code give
     way (wrong e-mail, another device, lost code) and are deleted."""
@@ -105,7 +105,8 @@ async def signup(request: Request, body: SignupIn, db: DbServiceDep) -> SignupOu
                 "name": body.name,
                 "full_name": body.name,
                 "cpf": body.cpf,
-                "phone": body.phone,
+                # Optional (#29): the profile trigger stores a missing one as null.
+                **({"phone": body.phone} if body.phone else {}),
                 # The profile trigger creates the profile as pending.
                 "flyer_signup": True,
             },
@@ -159,11 +160,11 @@ async def activate_signup(
 async def profile_status(
     request: Request, user_id: PendingProfileDep, db: DbServiceDep
 ) -> ProfileIdentityStatus:
-    """Whether the account has CPF and phone, with the owner's own masked, and whether
-    its sign-up still waits for the code."""
+    """Whether the account has its CPF (the phone is optional, #29), with the owner's own
+    data masked, and whether its sign-up still waits for the code."""
     identity = await db.get_profile_identity(user_id)
     cpf, phone = identity.get("cpf"), identity.get("phone")
-    complete = bool(cpf) and bool(phone)
+    complete = bool(cpf)
     pending = bool(identity.get("signup_pending"))
     if complete and not pending:
         remember_complete_profile(user_id)
@@ -177,7 +178,7 @@ async def profile_status(
 async def complete_profile(
     request: Request, body: ProfileIdentityIn, user_id: PendingProfileDep, db: DbServiceDep
 ) -> Response:
-    """Set CPF and phone, once (Google accounts on first access)."""
+    """Set the CPF, and the phone if given, once (Google accounts on first access)."""
     await _claim_identity(db, email=None, cpf=body.cpf, phone=body.phone, exclude_user_id=user_id)
     if not await db.complete_profile_identity(user_id, body.cpf, body.phone):
         raise HTTPException(

@@ -290,3 +290,89 @@ async def test_completing_only_fills_an_empty_cpf() -> None:
 
     params = client.patch.await_args.kwargs["params"]
     assert params == {"id": "eq.user-1", "cpf": "is.null"}
+
+
+# ------------------------------------------- phone is optional (#29, 2026-10-17) --
+
+
+@pytest.mark.parametrize("phone", [None, "", "   "])
+def test_sign_up_without_a_phone(db: MagicMock, phone: str | None) -> None:
+    body = {k: v for k, v in SIGNUP.items() if k != "phone"}
+    if phone is not None:
+        body["phone"] = phone
+
+    response = TestClient(app).post("/auth/signup", json=body)
+
+    assert response.status_code == 201
+    db.find_identity_conflicts.assert_awaited_once_with(
+        email="ana@example.com", cpf="52998224725", phone=None, active_only=True
+    )
+    db.find_pending_signups.assert_awaited_once_with(email="ana@example.com", cpf="52998224725", phone=None)
+    assert "phone" not in db.signup_user.await_args.kwargs["data"]
+
+
+def test_a_phone_given_is_still_checked(db: MagicMock) -> None:
+    response = TestClient(app).post("/auth/signup", json={**SIGNUP, "phone": "(81) 3123-4567"})
+
+    assert response.status_code == 422
+    db.signup_user.assert_not_called()
+
+
+def test_completing_with_the_cpf_only(db: MagicMock) -> None:
+    with _as(_payload()):
+        response = TestClient(app).put("/auth/profile/identity", headers=AUTH, json={"cpf": "529.982.247-25"})
+
+    assert response.status_code == 204
+    db.find_identity_conflicts.assert_awaited_once_with(
+        email=None, cpf="52998224725", phone=None, exclude_user_id="user-1", active_only=True
+    )
+    db.complete_profile_identity.assert_awaited_once_with("user-1", "52998224725", None)
+
+
+def test_an_account_with_cpf_and_no_phone_is_complete(db: MagicMock) -> None:
+    db.get_profile_identity.return_value = {"cpf": "52998224725", "phone": None}
+
+    with _as(_payload()):
+        body = TestClient(app).get("/auth/profile/status", headers=AUTH).json()
+
+    assert body == {"complete": True, "pending": False, "cpf_masked": "***.982.247-**", "phone_masked": None}
+
+
+async def test_account_state_only_needs_the_cpf() -> None:
+    db = DBService(MagicMock())
+    with patch.object(db, "get_profile_identity", AsyncMock(return_value={"cpf": "52998224725", "phone": None})):
+        assert await db.get_account_state("user-1") == "ok"
+    with patch.object(db, "get_profile_identity", AsyncMock(return_value={"cpf": None, "phone": "+5581912345678"})):
+        assert await db.get_account_state("user-1") == "incomplete"
+
+
+async def test_conflicts_without_a_phone_never_match_empty_phones() -> None:
+    rows = [{"id": "u2", "cpf": "11144477735", "phone": None, "email": "ana@example.com"}]
+    client = MagicMock()
+    client.get = AsyncMock(return_value=httpx.Response(200, json=rows, request=httpx.Request("GET", "http://x")))
+
+    taken = await DBService(client).find_identity_conflicts(email="ana@example.com", cpf="52998224725", phone=None)
+
+    assert taken == {"email"}
+    or_filter = client.get.await_args.kwargs["params"]["or"]
+    assert "phone" not in or_filter
+
+
+async def test_pending_sign_ups_without_a_phone() -> None:
+    client = MagicMock()
+    client.get = AsyncMock(return_value=httpx.Response(200, json=[], request=httpx.Request("GET", "http://x")))
+
+    await DBService(client).find_pending_signups(email="ana@example.com", cpf="52998224725", phone=None)
+
+    assert "phone" not in client.get.await_args.kwargs["params"]["or"]
+
+
+async def test_completing_without_a_phone_leaves_it_alone() -> None:
+    client = MagicMock()
+    client.patch = AsyncMock(
+        return_value=httpx.Response(200, json=[{"id": "user-1"}], request=httpx.Request("PATCH", "http://x"))
+    )
+
+    await DBService(client).complete_profile_identity("user-1", "52998224725", None)
+
+    assert client.patch.await_args.kwargs["json"] == {"cpf": "52998224725"}
