@@ -24,21 +24,31 @@ SESSION_INVALID = "session_invalid"
 SESSION_INVALID_MESSAGE = "Sessão inválida: entre novamente."
 RATE_LIMITED = "rate_limited"
 RATE_LIMITED_MESSAGE = "Muitas tentativas seguidas. Aguarde um pouco e tente de novo."
+NOT_AUTHENTICATED = "not_authenticated"
+NOT_AUTHENTICATED_MESSAGE = "Entre na sua conta para continuar."
 
 
 class ApiError(Exception):
     """An HTTP error the app can recognise by ``code``."""
 
-    def __init__(self, status_code: int, code: str, message: str) -> None:
+    def __init__(
+        self, status_code: int, code: str, message: str, headers: dict[str, str] | None = None
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
+        self.headers = headers
 
 
 def session_invalid() -> ApiError:
     """The session belongs to an account that no longer exists: sign in again."""
     return ApiError(401, SESSION_INVALID, SESSION_INVALID_MESSAGE)
+
+
+def not_authenticated() -> ApiError:
+    """No bearer token at all (#42: FastAPI's own answer was 403 "Not authenticated")."""
+    return ApiError(401, NOT_AUTHENTICATED, NOT_AUTHENTICATED_MESSAGE, {"WWW-Authenticate": "Bearer"})
 
 
 def error_body(message: str, code: str) -> dict[str, str | None]:
@@ -63,7 +73,7 @@ async def api_error_handler(request: Request, exc: Exception) -> Response:
     assert isinstance(exc, ApiError)
     if exc.status_code >= 500:
         await _record_5xx(request, exc.status_code, exc.code, "ApiError", exc.message)
-    return JSONResponse(error_body(exc.message, exc.code), status_code=exc.status_code)
+    return JSONResponse(error_body(exc.message, exc.code), status_code=exc.status_code, headers=exc.headers)
 
 
 async def http_exception_handler(request: Request, exc: Exception) -> Response:
@@ -86,6 +96,11 @@ async def rate_limit_handler(request: Request, exc: Exception) -> Response:
 
 
 def install_error_handlers(app: FastAPI) -> None:
+    from fastapi.exceptions import RequestValidationError
+
+    from app.core.validation_messages import validation_error_handler
+
     app.add_exception_handler(ApiError, api_error_handler)
+    app.add_exception_handler(RequestValidationError, validation_error_handler)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RateLimitExceeded, rate_limit_handler)

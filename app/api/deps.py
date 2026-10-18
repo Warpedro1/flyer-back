@@ -9,11 +9,25 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import settings
+from app.core.errors import not_authenticated
 from app.core.request_context import set_current_user
 from app.core.security import decode_access_token, session_needs_email_code
 from app.services.db_service import DBService
 
-bearer_scheme = HTTPBearer(auto_error=True)
+
+
+class _BearerToken(HTTPBearer):
+    """``HTTPBearer`` that answers 401 ``not_authenticated`` in pt-BR when the token is
+    missing or not a Bearer one (FastAPI's own answer was 403 "Not authenticated", #42)."""
+
+    async def __call__(self, request: Request) -> HTTPAuthorizationCredentials:  # type: ignore[override]
+        credentials = await super().__call__(request)
+        if credentials is None:
+            raise not_authenticated()
+        return credentials
+
+
+bearer_scheme = _BearerToken(auto_error=False)
 
 # `detail` the app recognises to send the user to the e-mail code screen.
 EMAIL_CODE_REQUIRED = "email_code_required"
