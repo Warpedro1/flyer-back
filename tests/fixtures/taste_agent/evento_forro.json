@@ -1,0 +1,14 @@
+{
+  "description": "Um evento importado curto (Sympla), como os do catálogo de Recife.",
+  "event": {
+    "title": "Forró de Lais Senna",
+    "description": "Noite de forró pé de serra com a cantora Lais Senna, sanfona, zabumba e triângulo. Traga seu par!",
+    "category": "musica_show",
+    "kind": "event"
+  },
+  "expected_any": [
+    ["forró", "forró pé de serra", "forró tradicional"],
+    ["música nordestina", "música regional", "cultura nordestina", "música brasileira"],
+    ["dança", "dançar", "dança a dois", "dança de salão"]
+  ]
+}

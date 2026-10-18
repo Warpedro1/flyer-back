@@ -47,9 +47,10 @@ def _place(**overrides: Any) -> StandardizedEvent:
     return StandardizedEvent(**data)
 
 
-def _db() -> MagicMock:
+def _db(stored: dict[str, dict[str, Any]] | None = None) -> MagicMock:
     db = MagicMock()
     db.upsert_events = AsyncMock(side_effect=lambda rows: len(rows))
+    db.list_source_keywords = AsyncMock(return_value=stored or {})
     return db
 
 
@@ -104,8 +105,30 @@ async def test_a_failed_embedding_still_imports_the_items(caplog: pytest.LogCapt
         count = await upsert_events(db, [_event(1)])
 
     assert count == 1
-    assert db.upsert_events.await_args.args[0][0]["event_embedding"] is None
+    # No new vector: the row keeps the one it had (fresh keywords stay consistent).
+    assert "event_embedding" not in db.upsert_events.await_args.args[0][0]
     assert any(r.levelno >= logging.ERROR for r in caplog.records)
+
+
+async def test_rows_with_and_without_a_new_vector_go_in_separate_requests() -> None:
+    db = _db()
+    calls = 0
+
+    async def embed(texts: list[str]) -> list[list[float]]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("openai down")
+        return [VEC] * len(texts)
+
+    with patch("app.services.etl.load.ai_service.generate_embeddings", embed):
+        await upsert_events(db, [_event(n) for n in range(150)])
+
+    requests = [c.args[0] for c in db.upsert_events.await_args_list]
+    assert [len(r) for r in requests] == [100, 50]
+    for rows in requests:
+        assert len({tuple(sorted(r)) for r in rows}) == 1
+    assert "event_embedding" in requests[0][0] and "event_embedding" not in requests[1][0]
 
 
 async def test_upserts_go_in_chunks() -> None:

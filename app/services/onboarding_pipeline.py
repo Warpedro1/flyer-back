@@ -1,7 +1,9 @@
-"""Onboarding validate/complete orchestration (guard → taste → embeddings → taste docs → profile).
+"""Onboarding validate/complete orchestration (guard → taste agent → embeddings → taste docs → profile).
 
 Each step has its own time limit (#26); together they fit a 60 s Vercel function
-(``ONBOARDING_BUDGET_SECONDS``).
+(``ONBOARDING_BUDGET_SECONDS``). The person's vector is made from the keywords and
+the summary the taste agent writes (#26 part 2, #31); only when no answer could be
+analysed does it fall back to the raw answers.
 """
 
 from __future__ import annotations
@@ -28,10 +30,13 @@ from app.services.onboarding_contract import (
     validate_onboarding_answers,
 )
 from app.services.onboarding_guard import GuardResult, run_onboarding_guard
-from app.services.taste_extraction import (
+from app.services.taste_agent import (
     StepQA,
+    TasteKeywords,
+    analyze_person,
     build_canonical_taste_corpus,
-    extract_tastes_per_step,
+    person_embedding_text,
+    step_documents,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,11 +91,20 @@ async def run_complete_onboarding_pipeline(
         raise _map_guard_failure_to_http(gr)
 
     qas = [StepQA(k, p, a) for k, p, a in ordered_qa_tuples(answers)]
-    documents = await extract_tastes_per_step(qas)
+    person = await analyze_person(qas)
+    documents = step_documents(person.steps)
     canonical = build_canonical_taste_corpus(documents)
     prefs_md = build_preferences_markdown(answers)
     store_text = prefs_md if prefs_md.strip() else canonical[: settings.ONBOARDING_ANSWERS_TOTAL_MAX_CHARS]
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    # Decision 2026-10-18: keywords and summary only; the raw answers are the fallback.
+    vector_text = person_embedding_text(person.taste) if person.taste else canonical
+    logger.info(
+        "Onboarding taste agent: %s (%d of %d answers analysed)",
+        person.mode,
+        sum(1 for s in person.steps if s.analysis is not None),
+        len(person.steps),
+    )
 
     # Embedding generation is the one step that depends on an external provider
     # (OpenAI). Surface its failure with a stable code instead of a generic 500,
@@ -98,7 +112,7 @@ async def run_complete_onboarding_pipeline(
     try:
         timeout = settings.EMBEDDING_TIMEOUT_SECONDS
         embedding_vec, doc_vecs = await asyncio.gather(
-            ai_service.generate_embedding(canonical, timeout=timeout),
+            ai_service.generate_embedding(vector_text, timeout=timeout),
             ai_service.generate_embeddings([d.page_content for d in documents], timeout=timeout),
         )
     except HTTPException:
@@ -115,6 +129,9 @@ async def run_complete_onboarding_pipeline(
             "step_key": str(d.metadata.get("step_key", f"idx_{i}")),
             "content": d.page_content,
             "extraction": str(d.metadata.get("extraction", "llm")),
+            # Every item carries the same keys: a PostgREST bulk upsert takes its
+            # columns from the rows.
+            "analysis": d.metadata.get("analysis"),
             "guide_schema_version": GUIDE_SCHEMA_VERSION,
             "embedding": vec,
         }
@@ -139,6 +156,10 @@ async def run_complete_onboarding_pipeline(
             user_id,
             {
                 "interest_embedding": embedding_vec,
+                # Cleared when nothing was analysed, so old keywords never sit next
+                # to a vector they did not make.
+                "interest_keywords": list(person.taste.keywords) if person.taste else None,
+                "interest_summary": person.taste.summary if person.taste else None,
                 "onboarding_preferences_text": store_text,
                 "onboarding_preferences_hash": digest,
                 "guide_schema_version": GUIDE_SCHEMA_VERSION,
@@ -162,15 +183,22 @@ async def ensure_interest_embedding(
     jwt: str,
     profile: dict[str, Any],
 ) -> list[float] | None:
-    """Lazy backfill: rebuild `interest_embedding` from stored preferences text when missing.
+    """Lazy backfill: rebuild `interest_embedding` when it is missing.
 
     Users who onboarded before the pipeline existed (or whose embedding write failed)
-    keep a valid `onboarding_preferences_text` but no vector, which made discovery hard-fail
-    with 400. When we can reconstruct it, we generate the embedding from that text, persist
-    it (service_role), and return it. Returns None when there is nothing to rebuild from.
+    keep their keywords or a valid `onboarding_preferences_text` but no vector, which
+    made discovery hard-fail with 400. The keywords and summary come first, as in the
+    onboarding (#31: they are stored so a vector can be rebuilt without the LLM); the
+    raw preferences text is the fallback. The vector is persisted (service_role) and
+    returned; None when there is nothing to rebuild from.
     """
-    prefs_raw = profile.get("onboarding_preferences_text")
-    text = str(prefs_raw).strip() if prefs_raw else ""
+    keywords = [str(k) for k in (profile.get("interest_keywords") or []) if str(k).strip()]
+    if keywords:
+        summary = str(profile.get("interest_summary") or "").strip()
+        text = person_embedding_text(TasteKeywords(tuple(keywords), summary))
+    else:
+        prefs_raw = profile.get("onboarding_preferences_text")
+        text = str(prefs_raw).strip() if prefs_raw else ""
     if not text:
         return None
     try:

@@ -36,6 +36,7 @@ from app.models.schemas import (
 from app.services.ai_service import ai_service
 from app.services.checkin_service import checkin_method
 from app.services.checkin_window import checkin_state
+from app.services.event_keywords import embed_app_events
 from app.services.event_recurrence import expand_recurrence
 from app.services.interest_sync import parse_interest_embedding
 from app.services.onboarding_pipeline import ensure_interest_embedding
@@ -270,33 +271,6 @@ async def _check_uploads_and_place(
         await require_place(db, body.place_id, jwt)
 
 
-async def _embed_events_best_effort(
-    db: DbServiceDep,
-    event_ids: list[str],
-    body: _EventFields,
-) -> None:
-    """Generate one embedding from the event's text and attach it to every occurrence.
-
-    Best-effort: a missing/failing embedding provider must not fail event creation
-    (the event is simply less discoverable until re-embedded).
-    """
-    if not event_ids:
-        return
-    text = " ".join(
-        part for part in (body.title, body.description or "", body.category or "") if part
-    ).strip()
-    if not text:
-        return
-    try:
-        vec = await ai_service.generate_embedding(text)
-        if vec:
-            await db.set_events_embedding(event_ids, vec)
-    except Exception:
-        # Error, not warning: the event is created but personalised discovery ranks
-        # it last until it gets a vector. This used to fail silently for every event.
-        logger.exception("Event embedding failed (ids=%s)", event_ids)
-
-
 @router.post("/", response_model=EventRead, status_code=status.HTTP_201_CREATED)
 @limiter.limit("10/minute")
 async def create_event(
@@ -358,7 +332,8 @@ async def create_event(
             detail="Não foi possível criar o evento. Tente de novo.",
         ) from None
 
-    await _embed_events_best_effort(db, all_ids, body)
+    # Keywords and vector (#22 B), best effort: one per series, the text is shared.
+    await embed_app_events(db, all_ids, created[0])
 
     first = created[0]
     first_id = str(first["id"])
@@ -608,7 +583,8 @@ async def update_event(
     )
     # Always written: without a custom trophy the default follows the (new) title.
     await db.upsert_trophy_template(_trophy_row(event_id, body))
-    await _embed_events_best_effort(db, [event_id], body)
+    # Only redone when the title, description or category changed.
+    await embed_app_events(db, [event_id], row, previous=current)
 
     media_map = await db.batch_fetch_event_media([event_id], jwt)
     return _row_to_event_read(row, media_map.get(event_id, []))
