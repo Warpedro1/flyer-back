@@ -96,3 +96,15 @@ def test_clients_still_cannot_call_discovery(mdb: Any) -> None:
     ).fetchall()
 
     assert {r[0] for r in rows} & {"anon", "authenticated", "PUBLIC"} == set()
+
+
+def test_the_cover_the_moderation_dropped_is_remembered_apart(mdb: Any) -> None:
+    event_id = _event(mdb, "Show", "No Recife", None)
+
+    mdb.execute(
+        "update public.events set moderation_hash = %s, moderation_dropped_cover = 'https://c/1.jpg' where id = %s",
+        (event_moderation_hash("Show", "No Recife", None), event_id),
+    )
+
+    # The row as stored (without that cover) is what the moderation saw.
+    assert _stale(mdb, event_id) is False

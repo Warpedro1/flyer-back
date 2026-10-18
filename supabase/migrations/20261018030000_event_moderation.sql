@@ -14,7 +14,8 @@ alter table public.events
   add column if not exists moderation_hash text,
   add column if not exists moderated_at timestamptz,
   add column if not exists moderation_blocked boolean not null default false,
-  add column if not exists moderation_reasons text[];
+  add column if not exists moderation_reasons text[],
+  add column if not exists moderation_dropped_cover text;
 
 alter table public.events
   add column if not exists moderation_stale boolean
@@ -32,6 +33,8 @@ comment on column public.events.moderation_blocked is
   'Verdadeiro quando a moderação recusou o conteúdo importado: o evento some da descoberta.';
 comment on column public.events.moderation_reasons is
   'Categorias da moderação que recusaram o conteúdo (sexual, violence…).';
+comment on column public.events.moderation_dropped_cover is
+  'Capa da fonte que a moderação recusou ou não conseguiu ler: a próxima importação não a verifica de novo.';
 comment on column public.events.moderation_stale is
   'Verdadeiro quando o conteúdo atual ainda não foi verificado pela moderação.';
 

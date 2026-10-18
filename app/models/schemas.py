@@ -176,6 +176,9 @@ class EventRead(BaseModel):
     # Ingested items: the page at the source and its public cover image.
     source_url: str | None = None
     cover_url: str | None = None
+    # Hidden by the moderation (#22 A). Only its creator ever gets such an event,
+    # so they can see why and fix it by editing.
+    moderation_blocked: bool = False
 
 
 class DiscoverRequest(BaseModel):

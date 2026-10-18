@@ -125,3 +125,19 @@ def test_ten_an_hour(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_the_suggestion_is_bounded_like_the_field(client: TestClient) -> None:
     assert _ask(client, description="x" * 2001).status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("answer", "shown"),
+    [
+        ('"Venha para o arraial."', "Venha para o arraial."),
+        ('"Arraial do Bom Jesus" chega ao Recife Antigo.', '"Arraial do Bom Jesus" chega ao Recife Antigo.'),
+        ('Venha para a festa "Noite do Forró"', 'Venha para a festa "Noite do Forró"'),
+    ],
+)
+def test_only_quotes_around_the_whole_answer_are_taken_off(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, answer: str, shown: str
+) -> None:
+    monkeypatch.setattr(ai_service, "complete", AsyncMock(return_value=answer))
+
+    assert _ask(client).json()["description"] == shown

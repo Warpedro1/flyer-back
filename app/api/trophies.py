@@ -26,7 +26,8 @@ router = APIRouter(prefix="/trophies", tags=["trophies"])
 
 # What check-in reads from the event: no `select=*`, the row carries a 1536-d embedding.
 _CHECKIN_COLUMNS = (
-    "id,kind,source,title,lat,long,event_date,ends_at,checkin_opens_at,checkin_closed_at,opening_hours"
+    "id,kind,source,title,lat,long,event_date,ends_at,checkin_opens_at,checkin_closed_at,opening_hours,"
+    "moderation_blocked"
 )
 
 
@@ -40,7 +41,8 @@ async def check_in_trophy(
 ) -> TrophyRead:
     user_id, jwt = auth
     event = await db.get_event_by_id(body.event_id, jwt, select=_CHECKIN_COLUMNS)
-    if not event or event.get("lat") is None or event.get("long") is None:
+    # What the moderation hid (#22 A) gives no trophy.
+    if not event or event.get("lat") is None or event.get("long") is None or event.get("moderation_blocked"):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evento não encontrado.")
     # GPS check-in is for places only (decisions 2026-10-17).
     method = checkin_method(event)

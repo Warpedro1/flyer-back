@@ -43,6 +43,8 @@ IMAGE_UNREADABLE_MESSAGE = (
     "Não conseguimos verificar uma das imagens. Envie fotos em JPG, PNG, WEBP ou GIF sem animação."
 )
 
+UNREADABLE_IMAGE = "unreadable_image"
+
 # What the creator reads, by the SDK's category name.
 _CATEGORY_LABELS: dict[str, str] = {
     "sexual": "conteúdo sexual",
@@ -58,6 +60,8 @@ _CATEGORY_LABELS: dict[str, str] = {
     "self_harm_instructions": "automutilação",
     "violence": "violência",
     "violence_graphic": "violência explícita",
+    # Not the moderation's: an app event's photo it could not read (moderation pass).
+    UNREADABLE_IMAGE: "imagem que não conseguimos verificar",
 }
 _TEXTS_PER_REQUEST = 32
 # A signed URL handed to the moderation only has to live for the call.
@@ -105,6 +109,19 @@ async def _record(code: str, exc: BaseException, **details: Any) -> None:
     )
 
 
+def _text_chunks(texts: Sequence[str]) -> list[list[tuple[int, str]]]:
+    """The non-empty texts, by position, in requests of ``_TEXTS_PER_REQUEST``."""
+    todo = [(i, t[:8000]) for i, t in enumerate(texts) if t and t.strip()]
+    return [todo[start : start + _TEXTS_PER_REQUEST] for start in range(0, len(todo), _TEXTS_PER_REQUEST)]
+
+
+async def _chunk_verdicts(chunk: list[tuple[int, str]]) -> list[Verdict]:
+    results = await ai_service.moderate_inputs([t for _, t in chunk])
+    if len(results) != len(chunk):
+        raise ValueError(f"expected {len(chunk)} results, got {len(results)}")
+    return [Verdict(allowed, tuple(cats)) for allowed, cats in results]
+
+
 async def text_verdicts(texts: Sequence[str]) -> list[Verdict]:
     """One verdict per text; empty texts pass without a call.
 
@@ -112,19 +129,15 @@ async def text_verdicts(texts: Sequence[str]) -> list[Verdict]:
     through by this function.
     """
     out: list[Verdict] = [Verdict(True)] * len(texts)
-    todo = [(i, t[:8000]) for i, t in enumerate(texts) if t and t.strip()]
-    for start in range(0, len(todo), _TEXTS_PER_REQUEST):
-        chunk = todo[start : start + _TEXTS_PER_REQUEST]
+    for chunk in _text_chunks(texts):
         try:
-            results = await ai_service.moderate_inputs([t for _, t in chunk])
-            if len(results) != len(chunk):
-                raise ValueError(f"expected {len(chunk)} results, got {len(results)}")
+            verdicts = await _chunk_verdicts(chunk)
         except Exception as exc:
             logger.warning("Text moderation failed (%s)", type(exc).__name__)
             await _record("moderation_api_error", exc, stage="text")
             raise ModerationUnavailable from exc
-        for (i, _), (allowed, cats) in zip(chunk, results, strict=True):
-            out[i] = Verdict(allowed, tuple(cats))
+        for (i, _), verdict in zip(chunk, verdicts, strict=True):
+            out[i] = verdict
     return out
 
 
@@ -249,6 +262,8 @@ async def check_event_content(db: Any, body: Any) -> None:
 
 # Below this there is no point starting an image check: it would only time out.
 _MIN_CALL_SECONDS = 1.0
+# Text requests of one import at the same time (32 texts each).
+_TEXT_CONCURRENCY = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,15 +293,13 @@ async def check_imports(
         return []
     loop = asyncio.get_running_loop()
     deadline = loop.time() + budget_seconds
-    try:
-        texts = await asyncio.wait_for(text_verdicts([t for t, _ in items]), timeout=budget_seconds)
-    except (ModerationUnavailable, TimeoutError):
-        logger.warning("Import moderation unavailable for %d items; they wait for the next run.", len(items))
-        return [None] * len(items)
+    texts = await _import_text_verdicts([t for t, _ in items], deadline)
 
     out: list[ImportCheck | None] = [None] * len(items)
     pending: list[tuple[int, str]] = []
     for i, ((_, cover), verdict) in enumerate(zip(items, texts, strict=True)):
+        if verdict is None:
+            continue
         if not verdict.allowed:
             out[i] = ImportCheck(False, verdict.categories)
         elif cover:
@@ -311,6 +324,39 @@ async def check_imports(
     return out
 
 
+async def _import_text_verdicts(texts: Sequence[str], deadline: float) -> list[Verdict | None]:
+    """Like ``text_verdicts``, but a few requests at a time and each one on its own:
+    a request that fails or does not finish by ``deadline`` leaves only its own texts
+    unchecked (None); the ones that answered keep their verdicts."""
+    loop = asyncio.get_running_loop()
+    out: list[Verdict | None] = [None if t and t.strip() else Verdict(True) for t in texts]
+    gate = asyncio.Semaphore(_TEXT_CONCURRENCY)
+    failures: list[BaseException] = []
+
+    async def one(chunk: list[tuple[int, str]]) -> None:
+        async with gate:
+            left = deadline - loop.time()
+            if left <= 0:
+                return
+            try:
+                verdicts = await asyncio.wait_for(_chunk_verdicts(chunk), timeout=left)
+            except Exception as exc:
+                failures.append(exc)
+                return
+        for (i, _), verdict in zip(chunk, verdicts, strict=True):
+            out[i] = verdict
+
+    await asyncio.gather(*(one(chunk) for chunk in _text_chunks(texts)))
+    unchecked = sum(v is None for v in out)
+    if unchecked:
+        logger.warning("Import moderation left %d texts for the next run.", unchecked)
+    errors = [e for e in failures if not isinstance(e, TimeoutError)]
+    if errors:
+        # Once per import, not once per request.
+        await _record("moderation_api_error", errors[0], stage="import_text", failed_requests=len(errors))
+    return out
+
+
 def redact_import(title: str, description: str | None) -> tuple[str, str | None, bool]:
     """LGPD: contacts in an imported title or description become "[contato removido]"."""
     new_title = redact_personal_data(title) or title
@@ -332,12 +378,60 @@ class PassResult:
     not_checked: int = 0
 
 
+async def _app_row_check(db: Any, row: dict[str, Any]) -> ImportCheck:
+    """An event created in the app before #22 A, checked as saving it today would:
+    title, description, place, trophy, photos and trophy icon (videos cannot be).
+
+    A photo the moderation cannot read hides the event too: it could not be saved
+    today, and its creator can fix it by editing. Raises when something could not be
+    checked (the row then stays stale).
+    """
+    event_id = str(row["id"])
+    media = await db.get_event_media_rows(event_id)
+    trophy = await db.get_trophy_template_by_event(event_id) or {}
+    texts = [
+        import_text(str(row.get("title") or ""), row.get("description")),
+        row.get("location_name") or "",
+        trophy.get("name") or "",
+        trophy.get("description") or "",
+    ]
+    refused = [v for v in await text_verdicts(texts) if not v.allowed]
+    if refused:
+        return ImportCheck(False, tuple(dict.fromkeys(c for v in refused for c in v.categories)))
+    paths = [str(m["media_url"]) for m in media if m.get("type") == "image" and m.get("media_url")]
+    paths += [p for p in (trophy.get("icon_url"), row.get("cover_url")) if p]
+    if paths:
+        images = await path_verdicts(db, paths)
+        bad = [c for v in images if not v.allowed for c in (v.categories or (UNREADABLE_IMAGE,))]
+        if bad:
+            return ImportCheck(False, tuple(dict.fromkeys(bad)))
+    return ImportCheck(True)
+
+
+async def _app_row_checks(db: Any, rows: list[dict[str, Any]], *, budget_seconds: float) -> list[ImportCheck | None]:
+    gate = asyncio.Semaphore(4)
+
+    async def one(row: dict[str, Any]) -> ImportCheck | None:
+        async with gate:
+            try:
+                return await _app_row_check(db, row)
+            except Exception as exc:  # noqa: BLE001 — anything unchecked stays stale
+                logger.warning("Moderation pass could not check an app event (%s)", type(exc).__name__)
+                return None
+
+    try:
+        return list(await asyncio.wait_for(asyncio.gather(*(one(r) for r in rows)), timeout=budget_seconds))
+    except TimeoutError:
+        return [None] * len(rows)
+
+
 async def moderate_stale(db: Any, *, limit: int, budget_seconds: float) -> PassResult:
     """Check up to ``limit`` rows the moderation has not seen (``moderation_stale``):
     the catalogue that was here before #22 A, and whatever an import left unchecked.
 
     Imported rows also lose their contacts (LGPD) and, when refused or unreadable,
-    their cover; a refused row is hidden. Rows created in the app are only checked:
+    their cover; a refused row is hidden. Rows created in the app are checked as
+    saving them would (place, trophy and photos too) and hidden when refused, but
     their text is the creator's and is never rewritten.
     """
     rows = await db.list_stale_moderation_events(limit=limit)
@@ -351,10 +445,18 @@ async def moderate_stale(db: Any, *, limit: int, budget_seconds: float) -> PassR
         if row.get("source"):
             title, description, redacted = redact_import(title, description)
         prepared.append((row, title, description, redacted))
-    checks = await check_imports(
-        [(import_text(t, d), r.get("cover_url") if r.get("source") else None) for r, t, d, _ in prepared],
-        budget_seconds=budget_seconds,
+    imported = [i for i, (r, _, _, _) in enumerate(prepared) if r.get("source")]
+    from_app = [i for i, (r, _, _, _) in enumerate(prepared) if not r.get("source")]
+    import_checks, app_checks = await asyncio.gather(
+        check_imports(
+            [(import_text(prepared[i][1], prepared[i][2]), prepared[i][0].get("cover_url")) for i in imported],
+            budget_seconds=budget_seconds,
+        ),
+        _app_row_checks(db, [prepared[i][0] for i in from_app], budget_seconds=budget_seconds),
     )
+    checks: list[ImportCheck | None] = [None] * len(prepared)
+    for i, check in [*zip(imported, import_checks, strict=True), *zip(from_app, app_checks, strict=True)]:
+        checks[i] = check
     now = datetime.now(timezone.utc).isoformat()
     gate = asyncio.Semaphore(8)
 
@@ -364,12 +466,15 @@ async def moderate_stale(db: Any, *, limit: int, budget_seconds: float) -> PassR
         if redacted:
             fields.update(title=title, description=description)
             result.contacts_removed += 1
-        if check.allowed and check.drop_cover and cover:
-            cover = None
+        dropped = None
+        if check.allowed and check.drop_cover and cover and row.get("source"):
+            dropped, cover = cover, None
             fields["cover_url"] = None
             result.covers_removed += 1
         fields.update(
             moderation_hash=event_moderation_hash(title, description, cover),
+            # So the next import, which still brings that cover, knows it was refused.
+            moderation_dropped_cover=dropped,
             moderation_blocked=not check.allowed,
             moderation_reasons=None if check.allowed else list(check.categories),
         )

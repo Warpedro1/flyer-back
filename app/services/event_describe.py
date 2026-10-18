@@ -65,7 +65,11 @@ def _prompt(req: EventDescribeRequest) -> str:
 
 
 def _clean(text: str) -> str:
-    text = re.sub(r"\n{3,}", "\n\n", text.strip().strip('"').strip())
+    text = text.strip()
+    # Only quotes around the whole answer: a quoted name at either end stays.
+    if len(text) >= 2 and text[0] == text[-1] == '"' and '"' not in text[1:-1]:
+        text = text[1:-1].strip()
+    text = re.sub(r"\n{3,}", "\n\n", text)
     text = redact_personal_data(text) or ""
     if len(text) <= _MAX_CHARS:
         return text

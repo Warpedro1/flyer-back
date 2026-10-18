@@ -1122,11 +1122,13 @@ class DBService:
         min_lng: float,
         max_lng: float,
     ) -> list[dict[str, Any]]:
-        """Places (kind = place) inside a lat/long box. ETL only: service_role."""
+        """Places (kind = place) inside a lat/long box, hidden ones aside (#22 A).
+        ETL only: service_role."""
         r = await self._client.get(
             f"{REST_PREFIX}/events",
             params=[
                 ("kind", "eq.place"),
+                ("moderation_blocked", "is.false"),
                 ("lat", f"gte.{min_lat}"),
                 ("lat", f"lte.{max_lat}"),
                 ("long", f"gte.{min_lng}"),
@@ -1327,7 +1329,10 @@ class DBService:
                 f"{REST_PREFIX}/events",
                 params={
                     "source": f"eq.{source}",
-                    "select": "source_event_id,keywords,keywords_summary,keywords_hash,moderation_hash,moderation_blocked",
+                    "select": (
+                        "source_event_id,keywords,keywords_summary,keywords_hash,"
+                        "moderation_hash,moderation_blocked,moderation_dropped_cover"
+                    ),
                     "order": "id.asc",
                     "limit": str(page),
                     "offset": str(offset),
@@ -1367,7 +1372,7 @@ class DBService:
             params={
                 "moderation_stale": "is.true",
                 "moderation_blocked": "is.false",
-                "select": "id,source,kind,title,description,cover_url",
+                "select": "id,source,kind,title,description,location_name,cover_url",
                 "order": "id.asc",
                 "limit": str(limit),
                 "offset": str(offset),
@@ -1491,6 +1496,8 @@ class DBService:
             "status": "in.(confirmed,waitlisted,called,admitted)",
             "select": "status,waitlist_position,events!inner(*)",
             "events.kind": "eq.event",
+            # What the moderation hid is not listed (#22 A).
+            "events.moderation_blocked": "is.false",
             "limit": str(limit),
         }
         direction = "asc"

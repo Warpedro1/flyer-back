@@ -30,6 +30,7 @@ from app.core.personal_data import CONTACT_REMOVED, find_personal_data, redact_p
 from app.main import app
 from app.services import moderation
 from app.services.ai_service import AIService, ai_service
+from app.services.db_service import DBService
 from app.services.etl import pipeline
 from app.services.etl.load import upsert_events
 from app.services.etl.schemas import StandardizedEvent
@@ -83,6 +84,16 @@ def _says(flagged: dict[str, list[str]], *, images: Any = None) -> Any:
         ("CPF 529.982.247-25", ["CPF"]),
         ("52998224725", ["CPF"]),
         ("fulano@gmail.com ou 81 99999-8888", ["e-mail", "telefone"]),
+        # As people write them in Recife: no area code, area code with a 0, dashes
+        # pasted from Instagram or Word (#22 A review).
+        ("Reservas pelo zap: 99999-8888", ["telefone"]),
+        ("(081) 99999-8888", ["telefone"]),
+        ("081 3333-4444", ["telefone"]),
+        ("(81) 99999\u20138888", ["telefone"]),
+        ("81 9 9999 8888", ["telefone"]),
+        ("wa.me/5581999998888", ["telefone"]),
+        ("2025-2026, 2025\u20132026, das 19:00 às 23:00, 18/10/2026, 2026-10-18", []),
+        ("Senha 1234-5678, sala 9000-1000", []),
         ("Ingresso R$ 1.234,56, dia 12/10/2026 às 19:30", []),
         ("CNPJ 12.345.678/0001-90, CEP 50030-230", []),
         ("Rua da Aurora, 1234, sala 3001", []),
@@ -91,6 +102,12 @@ def _says(flagged: dict[str, list[str]], *, images: Any = None) -> Any:
 )
 def test_personal_data_is_found_without_taking_prices_dates_or_addresses(text: str, kinds: list[str]) -> None:
     assert find_personal_data(text) == kinds
+
+
+def test_dashes_and_the_mobile_without_area_code_are_replaced() -> None:
+    assert redact_personal_data("Zap 99999\u20138888, fixo (081) 3333-4444.") == (
+        f"Zap {CONTACT_REMOVED}, fixo {CONTACT_REMOVED}."
+    )
 
 
 def test_contacts_are_replaced() -> None:
@@ -482,6 +499,132 @@ async def test_checks_stop_at_the_budget(monkeypatch: pytest.MonkeyPatch) -> Non
     assert out[1] == moderation.ImportCheck(True)
 
 
+async def test_finished_text_checks_are_kept_when_time_runs_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    async def one_slow_chunk(inputs: list[Any]) -> list[tuple[bool, list[str]]]:
+        if "lento" in inputs[0]:
+            await asyncio.sleep(5)
+        return [(True, [])] * len(inputs)
+
+    monkeypatch.setattr(ai_service, "moderate_inputs", one_slow_chunk)
+    items = [(f"rápido {i}", None) for i in range(32)] + [(f"lento {i}", None) for i in range(8)]
+
+    out = await check_imports(items, budget_seconds=0.3)
+
+    assert out[:32] == [moderation.ImportCheck(True)] * 32
+    assert out[32:] == [None] * 8
+
+
+async def test_text_checks_run_side_by_side(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    async def slow(inputs: list[Any]) -> list[tuple[bool, list[str]]]:
+        await asyncio.sleep(0.2)
+        return [(True, [])] * len(inputs)
+
+    monkeypatch.setattr(ai_service, "moderate_inputs", slow)
+
+    # Four requests of 32 texts: one after another they would need 0.8 s.
+    out = await check_imports([(f"texto {i}", None) for i in range(128)], budget_seconds=0.6)
+
+    assert None not in out
+
+
+async def test_a_dropped_cover_is_remembered_and_not_checked_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ai_service, "moderate_inputs", _says({}, images=(False, ["violence"])))
+    ev = _imported(1)
+    first = _etl_db()
+
+    await _load(first, [ev])
+
+    row = _rows(first)["s1"]
+    assert row["cover_url"] is None
+    assert row["moderation_dropped_cover"] == ev.cover_url
+
+    moderate = AsyncMock()
+    monkeypatch.setattr(ai_service, "moderate_inputs", moderate)
+    again = _etl_db(
+        {
+            "s1": {
+                "moderation_hash": row["moderation_hash"],
+                "moderation_dropped_cover": ev.cover_url,
+                "moderation_blocked": False,
+            }
+        }
+    )
+
+    result = await _load(again, [ev])
+
+    moderate.assert_not_awaited()
+    row = _rows(again)["s1"]
+    assert row["cover_url"] is None
+    assert "moderation_hash" not in row
+    assert result.covers_removed == 0
+
+
+async def test_a_new_cover_after_a_dropped_one_is_checked(monkeypatch: pytest.MonkeyPatch) -> None:
+    moderate = AsyncMock(side_effect=_says({}))
+    monkeypatch.setattr(ai_service, "moderate_inputs", moderate)
+    ev = _imported(1, cover_url="https://images.sympla.com.br/nova.jpg")
+    db = _etl_db(
+        {
+            "s1": {
+                "moderation_hash": event_moderation_hash(ev.title, ev.description, None),
+                "moderation_dropped_cover": "https://images.sympla.com.br/1.jpg",
+            }
+        }
+    )
+
+    await _load(db, [ev])
+
+    assert moderate.await_count == 2
+    row = _rows(db)["s1"]
+    assert row["cover_url"] == ev.cover_url
+    assert row["moderation_dropped_cover"] is None
+
+
+async def test_a_hidden_row_is_checked_again_and_comes_back_when_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The source went back to the content that was allowed before the refused one.
+    ev = _imported(1)
+    db = _etl_db({"s1": {"moderation_hash": _hash(ev), "moderation_blocked": True}})
+
+    await _load(db, [ev])
+
+    assert _rows(db)["s1"]["moderation_blocked"] is False
+
+
+async def test_a_hidden_row_refused_again_stays_as_it_was(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ai_service, "moderate_inputs", _says({"Show 1": ["hate"]}))
+    ev = _imported(1)
+    db = _etl_db({"s1": {"moderation_hash": "refused", "moderation_blocked": True}})
+
+    result = await _load(db, [ev])
+
+    assert _rows(db) == {}
+    db.block_imported_event.assert_not_awaited()
+    assert result.blocked == 1
+
+
+async def test_events_are_not_linked_to_hidden_places() -> None:
+    client = MagicMock()
+    client.get = AsyncMock(return_value=httpx.Response(200, json=[], request=httpx.Request("GET", "http://x")))
+
+    await DBService(client).list_places_near(-8.1, -8.0, -34.9, -34.8)
+
+    assert ("moderation_blocked", "is.false") in client.get.await_args.kwargs["params"]
+
+
+async def test_the_import_reads_what_the_moderation_remembers() -> None:
+    client = MagicMock()
+    client.get = AsyncMock(return_value=httpx.Response(200, json=[], request=httpx.Request("GET", "http://x")))
+
+    await DBService(client).list_source_state("sympla")
+
+    select = client.get.await_args.kwargs["params"]["select"].split(",")
+    assert {"moderation_hash", "moderation_blocked", "moderation_dropped_cover"} <= set(select)
+
+
 async def test_the_import_removes_contacts_before_anything_is_stored() -> None:
     raw = [{"id": "e1"}]
     ev = _imported(1, description="Ingressos: (81) 99999-8888")
@@ -515,6 +658,8 @@ async def test_the_pass_redacts_imports_and_checks_app_rows_as_written(monkeypat
         ]
     )
     db.set_event_moderation = AsyncMock()
+    db.get_event_media_rows = AsyncMock(return_value=[])
+    db.get_trophy_template_by_event = AsyncMock(return_value=None)
 
     result = await moderate_stale(db, limit=50, budget_seconds=5)
 
@@ -526,6 +671,152 @@ async def test_the_pass_redacts_imports_and_checks_app_rows_as_written(monkeypat
     assert written["c"]["moderation_blocked"] is True
     assert written["c"]["moderation_reasons"] == ["violence"]
     assert result == PassResult(picked=3, checked=3, blocked=1, covers_removed=0, contacts_removed=1, not_checked=0)
+
+
+def _app_rows_db(rows: list[dict[str, Any]], media: dict[str, list[dict[str, Any]]], trophies: dict[str, Any]) -> MagicMock:
+    db = MagicMock()
+    db.list_stale_moderation_events = AsyncMock(return_value=rows)
+    db.get_event_media_rows = AsyncMock(side_effect=lambda event_id: media.get(event_id, []))
+    db.get_trophy_template_by_event = AsyncMock(side_effect=lambda event_id: trophies.get(event_id))
+    db.set_event_moderation = AsyncMock()
+    return db
+
+
+def _app_row(event_id: str, title: str, location: str = "Praça do Arsenal") -> dict[str, Any]:
+    return {"id": event_id, "source": None, "title": title, "description": None, "location_name": location, "cover_url": None}
+
+
+async def test_the_pass_checks_everything_an_app_event_shows(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Events created in the app before #22 A: their place, trophy and photos too,
+    # as saving them today would.
+    monkeypatch.setattr(ai_service, "moderate_inputs", _says({"Ódio FC": ["hate"], "Beco da briga": ["violence"]}))
+    seen: list[list[str]] = []
+
+    async def paths(_db: Any, items: list[str]) -> list[Verdict]:
+        seen.append(list(items))
+        return [Verdict(False, ("sexual",)) if p == "user-1/foto.jpg" else Verdict(True) for p in items]
+
+    monkeypatch.setattr(moderation, "path_verdicts", paths)
+    db = _app_rows_db(
+        [_app_row("trophy", "Festa"), _app_row("place", "Sarau", "Beco da briga"), _app_row("photo", "Feira"), _app_row("ok", "Aula")],
+        media={"photo": [{"media_url": "user-1/foto.jpg", "type": "image"}, {"media_url": "user-1/v.mp4", "type": "video"}]},
+        trophies={
+            "trophy": {"name": "Ódio FC", "description": None, "icon_url": None},
+            "ok": {"name": "Aluno", "description": None, "icon_url": "user-1/icone.png"},
+        },
+    )
+
+    result = await moderate_stale(db, limit=50, budget_seconds=5)
+
+    written = {c.args[0]: c.args[1] for c in db.set_event_moderation.await_args_list}
+    assert written["trophy"]["moderation_reasons"] == ["hate"]
+    assert written["place"]["moderation_reasons"] == ["violence"]
+    assert written["photo"]["moderation_reasons"] == ["sexual"]
+    assert written["ok"]["moderation_blocked"] is False
+    assert all(written[k]["moderation_blocked"] for k in ("trophy", "place", "photo"))
+    # Videos cannot be checked; the icon is.
+    assert sorted(seen) == [["user-1/foto.jpg"], ["user-1/icone.png"]]
+    assert result.blocked == 3 and result.checked == 4
+
+
+async def test_an_app_event_whose_photos_cannot_be_checked_stays_unchecked(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(moderation, "path_verdicts", AsyncMock(side_effect=moderation.ModerationUnavailable("down")))
+    db = _app_rows_db([_app_row("photo", "Feira")], media={"photo": [{"media_url": "user-1/foto.jpg", "type": "image"}]}, trophies={})
+
+    result = await moderate_stale(db, limit=50, budget_seconds=5)
+
+    db.set_event_moderation.assert_not_awaited()
+    assert result.not_checked == 1 and result.checked == 0
+
+
+async def test_an_unreadable_photo_hides_an_app_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(moderation, "path_verdicts", AsyncMock(return_value=[Verdict(False, unreadable=True)]))
+    db = _app_rows_db([_app_row("photo", "Feira")], media={"photo": [{"media_url": "https://velho/foto.jpg", "type": "image"}]}, trophies={})
+
+    await moderate_stale(db, limit=50, budget_seconds=5)
+
+    fields = db.set_event_moderation.await_args.args[1]
+    assert fields["moderation_blocked"] is True
+    assert fields["moderation_reasons"] == ["unreadable_image"]
+    assert reasons(fields["moderation_reasons"]) == "imagem que não conseguimos verificar"
+
+
+async def test_the_pass_reads_the_place_of_each_row() -> None:
+    client = MagicMock()
+    client.get = AsyncMock(return_value=httpx.Response(200, json=[], request=httpx.Request("GET", "http://x")))
+
+    await DBService(client).list_stale_moderation_events(limit=10)
+
+    assert "location_name" in client.get.await_args.kwargs["params"]["select"].split(",")
+
+
+# ------------------------------------------------- hidden rows stay hidden --
+
+
+async def test_my_events_leave_out_hidden_events_i_am_going_to() -> None:
+    client = MagicMock()
+    client.get = AsyncMock(return_value=httpx.Response(200, json=[], request=httpx.Request("GET", "http://x")))
+
+    await DBService(client).get_events_going("user-1", "jwt")
+
+    assert client.get.await_args.kwargs["params"]["events.moderation_blocked"] == "is.false"
+
+
+def _hidden(creator: str | None = None) -> dict[str, Any]:
+    return {
+        "id": "evt-1",
+        "kind": "event",
+        "source": None if creator else "sympla",
+        "creator_id": creator,
+        "title": "Show",
+        "lat": -8.06,
+        "long": -34.87,
+        "moderation_blocked": True,
+    }
+
+
+def test_its_creator_still_sees_a_hidden_event(api: MagicMock) -> None:
+    api.get_event_by_id = AsyncMock(return_value=_hidden(creator="user-1"))
+    api.sweep_expired_calls = AsyncMock()
+    api.count_rsvps_by_status = AsyncMock(return_value=0)
+    api.get_rsvp = AsyncMock(return_value=None)
+
+    response = TestClient(app).get("/events/evt-1")
+
+    assert response.status_code == 200
+    assert response.json()["moderation_blocked"] is True
+
+
+def test_someone_else_does_not_see_a_hidden_app_event(api: MagicMock) -> None:
+    api.get_event_by_id = AsyncMock(return_value=_hidden(creator="user-2"))
+
+    assert TestClient(app).get("/events/evt-1").status_code == 404
+
+
+def test_nobody_joins_a_hidden_event(api: MagicMock) -> None:
+    api.get_event_by_id = AsyncMock(return_value=_hidden(creator="user-2"))
+    api.rsvp_join = AsyncMock()
+
+    assert TestClient(app).post("/events/evt-1/rsvp").status_code == 404
+    api.rsvp_join.assert_not_called()
+
+
+def test_a_hidden_event_gives_no_ticket(api: MagicMock) -> None:
+    api.get_event_by_id = AsyncMock(return_value=_hidden(creator="user-2"))
+    api.get_rsvp = AsyncMock(return_value={"id": "r1", "status": "confirmed"})
+
+    assert TestClient(app).post("/events/evt-1/rsvp/qr", json={}).status_code == 404
+
+
+def test_a_hidden_place_gives_no_trophy(api: MagicMock) -> None:
+    api.get_event_by_id = AsyncMock(return_value={**_hidden(), "kind": "place", "source": "google_maps"})
+    api.insert_trophy = AsyncMock()
+
+    response = TestClient(app).post("/trophies/checkin", json={"event_id": "evt-1", "lat": -8.06, "long": -34.87})
+
+    assert response.status_code == 404
+    api.insert_trophy.assert_not_called()
+    assert "moderation_blocked" in api.get_event_by_id.await_args.kwargs["select"].split(",")
 
 
 @pytest.fixture

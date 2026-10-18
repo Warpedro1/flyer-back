@@ -133,6 +133,7 @@ def _row_to_event_read(
         price_level=int(row["price_level"]) if row.get("price_level") is not None else None,
         source_url=row.get("source_url"),
         cover_url=row.get("cover_url"),
+        moderation_blocked=bool(row.get("moderation_blocked")),
     )
 
 
@@ -494,8 +495,9 @@ async def get_event(
     """Return a single event by ID."""
     user_id, jwt = auth
     row = await db.get_event_by_id(event_id, jwt)
-    # What the moderation refused is not shown, not even by its link (#22 A).
-    if not row or row.get("moderation_blocked"):
+    # What the moderation refused is not shown, not even by its link (#22 A), except
+    # to its creator, who can fix it by editing.
+    if not row or (row.get("moderation_blocked") and str(row.get("creator_id")) != user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evento não encontrado.")
     media_map = await db.batch_fetch_event_media([event_id], jwt)
     media = media_map.get(event_id, [])

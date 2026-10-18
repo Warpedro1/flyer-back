@@ -10,8 +10,9 @@ cannot be read, and a batch whose embeddings failed keeps the vectors it had.
 Moderation (#22 A): what is new or changed since it was last checked goes through
 the moderation first (``IMPORT_MODERATION_BUDGET_SECONDS``). Refused text never
 enters (a row that was already here is hidden); a refused or unreadable cover is
-dropped; what could not be checked in time waits for the next import (an existing
-row keeps its checked content). Unchanged rows are never checked again.
+dropped (and remembered, so the same cover is not checked again); what could not be
+checked in time waits for the next import (an existing row keeps its checked
+content). Unchanged rows are never checked again; hidden ones always are.
 """
 
 from __future__ import annotations
@@ -124,10 +125,23 @@ class LoadResult:
     covers_removed: int = 0
 
 
-def _moderated(ev: StandardizedEvent, row: dict[str, Any] | None) -> bool:
-    return row is not None and row.get("moderation_hash") == event_moderation_hash(
-        ev.title, ev.description, ev.cover_url
-    )
+def _as_moderated(ev: StandardizedEvent, row: dict[str, Any] | None) -> StandardizedEvent | None:
+    """The item as it goes in when the moderation already saw this content: as it
+    is, or without the cover the moderation dropped (the source keeps sending it).
+    None: it must be checked.
+
+    A hidden row is always checked again: its source may have gone back to content
+    that was allowed, and there are few of them.
+    """
+    if row is None or row.get("moderation_blocked"):
+        return None
+    stored = row.get("moderation_hash")
+    if stored == event_moderation_hash(ev.title, ev.description, ev.cover_url):
+        return ev
+    dropped = row.get("moderation_dropped_cover")
+    if dropped and ev.cover_url == dropped and stored == event_moderation_hash(ev.title, ev.description, None):
+        return ev.model_copy(update={"cover_url": None})
+    return None
 
 
 async def upsert_events(
@@ -141,7 +155,8 @@ async def upsert_events(
     if not events:
         return result
     stored = await _stored_state(db, events)
-    to_check = [ev for ev in events if not _moderated(ev, stored.get((ev.source, ev.source_event_id)))]
+    known = {(ev.source, ev.source_event_id): _as_moderated(ev, stored.get((ev.source, ev.source_event_id))) for ev in events}
+    to_check = [ev for ev in events if known[(ev.source, ev.source_event_id)] is None]
     budget = settings.IMPORT_MODERATION_BUDGET_SECONDS if moderation_budget_seconds is None else moderation_budget_seconds
     checks = await check_imports(
         [(import_text(ev.title, ev.description), ev.cover_url) for ev in to_check], budget_seconds=budget
@@ -153,8 +168,9 @@ async def upsert_events(
     to_block: list[tuple[StandardizedEvent, list[str]]] = []
     for ev in events:
         key = (ev.source, ev.source_event_id)
-        if key not in verdict:
-            kept.append((ev, {}))
+        as_stored = known[key]
+        if as_stored is not None:
+            kept.append((as_stored, {}))
             continue
         check = verdict[key]
         if check is None:
@@ -165,7 +181,9 @@ async def upsert_events(
             if key in stored and not stored[key].get("moderation_blocked"):
                 to_block.append((ev, list(check.categories)))
             continue
+        dropped = None
         if check.drop_cover and ev.cover_url:
+            dropped = ev.cover_url
             ev = ev.model_copy(update={"cover_url": None})
             result.covers_removed += 1
         kept.append(
@@ -176,6 +194,7 @@ async def upsert_events(
                     "moderated_at": now,
                     "moderation_blocked": False,
                     "moderation_reasons": None,
+                    "moderation_dropped_cover": dropped,
                 },
             )
         )
