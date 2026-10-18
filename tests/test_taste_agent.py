@@ -13,6 +13,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from app.core.config import settings
@@ -59,7 +61,7 @@ class _Fake:
         self.answers = answers
         self.calls: list[tuple[type, list[dict[str, str]]]] = []
 
-    def runnable(self, schema: type, _timeout: float) -> Any:
+    def runnable(self, schema: type) -> Any:
         fake = self
 
         class _R:
@@ -120,6 +122,50 @@ def test_weights_out_of_range_are_clamped() -> None:
 
 
 # ---------------------------------------------------------------- person --
+
+
+async def test_an_answer_with_nothing_found_is_not_evidence(fake: _Fake) -> None:
+    # "não sei": the synthesis must not fill its keywords from the questions.
+    fake.answers[AnswerAnalysis] = AnswerAnalysis(summary="Nada a dizer.")
+    fake.answers[TasteSynthesis] = TasteSynthesis(keywords=_kw("inventada"))
+
+    person = await analyze_person([StepQA("free_time", "P?", "não sei")])
+
+    assert (person.mode, person.taste) == ("raw", None)
+    assert [schema for schema, _ in fake.calls] == [AnswerAnalysis]
+
+
+async def test_the_merge_takes_the_first_summaries_that_exist(fake: _Fake) -> None:
+    def answer(messages: list[dict[str, str]]) -> AnswerAnalysis:
+        summary = "" if "vazio" in messages[1]["content"] else "Gosta de frevo."
+        return AnswerAnalysis(keywords=_kw("frevo"), summary=summary)
+
+    fake.answers[AnswerAnalysis] = answer
+    fake.answers[TasteSynthesis] = RuntimeError("down")
+
+    person = await analyze_person([StepQA("a", "P?", "vazio"), StepQA("b", "P?", "vazio"), StepQA("c", "P?", "x")])
+
+    assert person.taste is not None and person.taste.summary == "Gosta de frevo."
+
+
+def test_the_runnables_are_built_once_per_model_and_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Never per time limit: near a deadline every call has its own.
+    monkeypatch.setattr(taste_agent, "_runnables", {})
+    built: list[dict[str, Any]] = []
+
+    def chat(**kwargs: Any) -> Any:
+        built.append(kwargs)
+        return MagicMock()
+
+    with patch.object(taste_agent, "ChatOpenAI", side_effect=chat):
+        for _ in range(3):
+            real_structured(TasteSynthesis)
+        real_structured(AnswerAnalysis)
+
+    assert len(built) == 2
+    assert built[0]["timeout"] == max(
+        settings.TASTE_EXTRACT_TIMEOUT_SECONDS, settings.TASTE_SYNTH_TIMEOUT_SECONDS, settings.EVENT_KEYWORDS_TIMEOUT_SECONDS
+    )
 
 
 async def test_a_person_is_analysed_answer_by_answer_then_synthesized(fake: _Fake) -> None:
@@ -341,7 +387,11 @@ def test_the_reference_examples_are_well_formed() -> None:
 
 # ------------------------------------------------------------------ live --
 
-LIVE = os.environ.get("RUN_LIVE_LLM_TESTS") == "1" and not settings.OPENAI_API_KEY.startswith("sk-test")
+LIVE = (
+    os.environ.get("RUN_LIVE_LLM_TESTS") == "1"
+    and bool(settings.OPENAI_API_KEY)
+    and not settings.OPENAI_API_KEY.startswith("sk-test")
+)
 
 
 def _covers(keywords: tuple[str, ...], group: list[str]) -> bool:

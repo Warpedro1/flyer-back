@@ -67,8 +67,9 @@ class KeywordsRequest(BaseModel):
     # Decision 2026-10-18: the owner sees the cost before anything is spent, so the
     # default is the estimate alone.
     dry_run: bool = True
-    # Rows tried in this call; what the time budget leaves undone stays stale.
-    limit: int = Field(default=80, ge=1, le=300)
+    # Rows tried in this call; what the time budget leaves undone stays stale. At
+    # most one embedding batch, so the call ends inside the 60 s of a function.
+    limit: int = Field(default=80, ge=1, le=100)
 
 
 class KeywordsEstimate(BaseModel):

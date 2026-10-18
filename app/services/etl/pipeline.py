@@ -13,15 +13,16 @@ from app.services.etl.apify import fetch_dataset_items
 from app.services.etl.load import link_events_to_places, upsert_events
 from app.services.etl.schemas import IngestionReport, StandardizedEvent
 from app.services.etl.sources import ApifySource
-from app.services.event_keywords import reprocess_stale
+from app.services.event_keywords import EMBED_BATCH, reprocess_stale
 
 logger = logging.getLogger(__name__)
 
-# The webhook runs in a 60 s function: keywords only use what is left of this, so
-# their embeddings and writes still fit after the LLM calls stop.
-_WEBHOOK_SECONDS = 45.0
+# The webhook runs in a 60 s function: the LLM calls stop at this mark, which
+# leaves one embedding batch (`EMBEDDING_TIMEOUT_SECONDS`), the error record and
+# the writes inside the limit. Hence at most one batch of rows per run.
+_WEBHOOK_SECONDS = 42.0
 _MIN_KEYWORDS_SECONDS = 5.0
-_KEYWORDS_PER_RUN = 200
+_KEYWORDS_PER_RUN = EMBED_BATCH
 
 
 async def ingest_dataset(
@@ -61,10 +62,11 @@ async def ingest_dataset(
         logger.exception("ETL load failed (source=%s, dataset=%s)", source.name, dataset_id)
         report.errors.append(f"load: {exc}")
 
-    # Keywords for the stale rows (#22 B) with the time left; the reprocessing
-    # (POST /admin/events/keywords) does the rest.
+    # Keywords for the stale rows (#22 B) with the time left, once the owner has
+    # approved the backlog's cost (KEYWORDS_ON_IMPORT, decision 2026-10-18); the
+    # reprocessing (POST /admin/events/keywords) does the rest.
     budget = min(settings.KEYWORDS_BUDGET_SECONDS, _WEBHOOK_SECONDS - (loop.time() - started))
-    if budget >= _MIN_KEYWORDS_SECONDS:
+    if settings.KEYWORDS_ON_IMPORT and budget >= _MIN_KEYWORDS_SECONDS:
         try:
             done = await reprocess_stale(db, limit=_KEYWORDS_PER_RUN, budget_seconds=budget)
             report.keywords = done.processed

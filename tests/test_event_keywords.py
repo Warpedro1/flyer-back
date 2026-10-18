@@ -144,6 +144,27 @@ async def test_fresh_keywords_without_a_vector_rebuild_it_without_the_llm(monkey
     assert db.set_events_keywords.await_args.kwargs["keywords"] == ["forró", "dança"]
 
 
+async def test_reverting_a_failed_edit_rebuilds_the_vector_from_the_old_keywords(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Edit 1 changed the text while the agent was down: the raw vector of that text
+    # was written and the keywords (of the original text) stayed. Edit 2 reverts.
+    calls = _agent(monkeypatch, "outra")
+    original = _row()
+    digest = event_content_hash(original["title"], original["description"], original["category"])
+    previous = {**original, "description": "Texto da edição 1", "keywords": ["forró"], "keywords_summary": "",
+                "keywords_hash": digest, "event_embedding": OLD}
+    db = _db()
+    embed = AsyncMock(return_value=VEC)
+
+    with patch.object(event_keywords.ai_service, "generate_embedding", embed):
+        await embed_app_events(db, ["evt-1"], original, previous=previous)
+
+    assert calls == []
+    assert "Palavras-chave: forró." in embed.await_args.args[0]
+    assert db.set_events_keywords.await_args.kwargs["vector"] == VEC
+
+
 async def test_an_edit_that_changed_the_text_asks_the_agent_again(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _agent(monkeypatch, "frevo")
     previous = {**_row(), "keywords": ["forró"], "keywords_hash": "old", "event_embedding": OLD}
@@ -304,16 +325,24 @@ async def test_a_reimport_reuses_fresh_keywords_and_leaves_the_rest_raw() -> Non
     assert not any(k.startswith("keywords") for k in db.upsert_events.await_args.args[0][0])
 
 
-async def test_without_the_stored_keywords_the_import_still_goes_in() -> None:
+async def test_without_the_stored_keywords_the_load_stops_before_overwriting() -> None:
+    # Guessing "no keywords" would give fresh rows a raw vector the reprocessing
+    # never sees (they are not stale).
     db = MagicMock()
     db.upsert_events = AsyncMock(side_effect=lambda rows: len(rows))
     db.list_source_keywords = AsyncMock(side_effect=RuntimeError("supabase down"))
 
-    with patch("app.services.etl.load.ai_service.generate_embeddings", AsyncMock(return_value=[VEC])):
-        assert await upsert_events(db, [_imported(1)]) == 1
+    with (
+        patch("app.services.etl.load.ai_service.generate_embeddings", AsyncMock(return_value=[VEC])),
+        pytest.raises(RuntimeError),
+    ):
+        await upsert_events(db, [_imported(1)])
+
+    db.upsert_events.assert_not_awaited()
 
 
-async def test_the_webhook_gives_keywords_with_the_time_left() -> None:
+async def test_the_webhook_gives_keywords_with_the_time_left(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "KEYWORDS_ON_IMPORT", True)
     raw = [{"title": "Parraxaxá", "placeId": "p1", "location": {"lat": -8.1, "lng": -34.9}}]
     done = AsyncMock(return_value=ReprocessResult(picked=5, processed=4, failed=1))
 
@@ -328,9 +357,27 @@ async def test_the_webhook_gives_keywords_with_the_time_left() -> None:
     assert report.keywords == 4
     assert report.errors == []
     assert 0 < done.await_args.kwargs["budget_seconds"] <= settings.KEYWORDS_BUDGET_SECONDS
+    assert done.await_args.kwargs["limit"] <= event_keywords.EMBED_BATCH
+
+
+async def test_the_webhook_spends_nothing_on_keywords_until_the_owner_approves() -> None:
+    # Decision 2026-10-18: the backlog's cost is approved first (KEYWORDS_ON_IMPORT).
+    assert settings.KEYWORDS_ON_IMPORT is False
+    done = AsyncMock()
+
+    with (
+        patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=[])),
+        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=0)),
+        patch("app.services.etl.pipeline.link_events_to_places", AsyncMock(return_value=0)),
+        patch("app.services.etl.pipeline.reprocess_stale", done),
+    ):
+        await pipeline.ingest_dataset(MagicMock(), MagicMock(), SOURCES["sympla"], "ds-1", "tok")
+
+    done.assert_not_awaited()
 
 
 async def test_a_slow_load_leaves_the_keywords_for_later(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "KEYWORDS_ON_IMPORT", True)
     monkeypatch.setattr(pipeline, "_WEBHOOK_SECONDS", 0.0)
     done = AsyncMock()
 
@@ -397,6 +444,13 @@ async def test_the_stored_keywords_of_a_source_are_read_page_by_page() -> None:
     assert [c.kwargs["params"]["offset"] for c in client.get.await_args_list] == ["0", "1000"]
 
 
-def test_the_webhooks_budget_leaves_room_for_the_writes() -> None:
-    assert pipeline._WEBHOOK_SECONDS + settings.EMBEDDING_TIMEOUT_SECONDS < 60
+def test_one_call_fits_a_function() -> None:
+    # One embedding batch at most after the LLM stops, plus the error record (2 s)
+    # and the writes: the webhook and the admin route end inside Vercel's 60 s.
+    from app.api.admin import KeywordsRequest
+
+    assert pipeline._KEYWORDS_PER_RUN <= event_keywords.EMBED_BATCH
+    assert KeywordsRequest.model_fields["limit"].metadata[-1].le <= event_keywords.EMBED_BATCH
+    assert pipeline._WEBHOOK_SECONDS + settings.EMBEDDING_TIMEOUT_SECONDS + 2 + 5 < 60
+    assert settings.KEYWORDS_BUDGET_SECONDS + settings.EMBEDDING_TIMEOUT_SECONDS + 2 + 5 < 60
     assert asyncio.iscoroutinefunction(reprocess_stale)

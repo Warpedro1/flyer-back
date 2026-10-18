@@ -77,7 +77,7 @@ def test_the_taste_agent_with_gpt5_sends_no_temperature(monkeypatch: pytest.Monk
         return MagicMock()
 
     with patch.object(taste_agent, "ChatOpenAI", side_effect=fake_chat):
-        real_structured(taste_agent.AnswerAnalysis, 5.0)
+        real_structured(taste_agent.AnswerAnalysis)
 
     assert built["temperature"] == 1
     assert built["reasoning_effort"] == "minimal"

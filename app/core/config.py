@@ -124,8 +124,12 @@ class Settings(BaseSettings):
     EVENT_KEYWORDS_TIMEOUT_SECONDS: float = Field(default=12.0, ge=3.0, le=60.0)
     TASTE_AGENT_CONCURRENCY: int = Field(default=8, ge=1, le=32)
     # What the import webhook and each reprocessing call may spend on keywords, so
-    # they end inside the 60 s of a Vercel function.
-    KEYWORDS_BUDGET_SECONDS: float = Field(default=35.0, ge=5.0, le=50.0)
+    # they end inside the 60 s of a Vercel function (one embedding batch after it).
+    KEYWORDS_BUDGET_SECONDS: float = Field(default=35.0, ge=5.0, le=40.0)
+    # The import also gives keywords to stale rows with the time it has left. Off
+    # until the owner approves the backlog's estimated cost (decision 2026-10-18):
+    # the first imports would otherwise pay for rows nobody approved.
+    KEYWORDS_ON_IMPORT: bool = False
     # OpenAI shut down text-moderation-latest on 2025-10-27 (#26).
     MODERATION_MODEL: str = "omni-moderation-latest"
     # Number of per-step taste docs retrieved and injected into the chat system prompt.

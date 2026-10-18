@@ -10,7 +10,10 @@ os.environ.setdefault("SUPABASE_JWT_SECRET", "test-jwt-secret")
 os.environ.setdefault("PUSHER_APP_ID", "1")
 os.environ.setdefault("PUSHER_KEY", "test-pusher-key")
 os.environ.setdefault("PUSHER_SECRET", "test-pusher-secret")
-os.environ.setdefault("OPENAI_API_KEY", "sk-test-key-for-ci")
+# The live taste-agent tests (RUN_LIVE_LLM_TESTS=1) need the real key from `.env`,
+# which an environment variable would hide.
+if os.environ.get("RUN_LIVE_LLM_TESTS") != "1":
+    os.environ.setdefault("OPENAI_API_KEY", "sk-test-key-for-ci")
 os.environ.setdefault("LANGSMITH_TRACING", "false")
 os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
 

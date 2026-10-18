@@ -101,7 +101,11 @@ async def embed_app_events(
         return
     digest = _hash(row)
     fresh = stored_keywords(previous) if previous and previous.get("keywords_hash") == digest else None
-    if fresh is not None and previous and previous.get("event_embedding") is not None:
+    # Nothing to redo only if this PUT kept the text AND the row was already fresh:
+    # reverting an edit whose agent call failed brings back the old keywords, but
+    # its vector is still the raw text of the edit.
+    unchanged = previous is not None and _hash(previous) == digest
+    if fresh is not None and unchanged and previous and previous.get("event_embedding") is not None:
         return
     taste = fresh or await analyze_event(event_text(row))
     try:

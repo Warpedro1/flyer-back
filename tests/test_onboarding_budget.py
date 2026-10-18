@@ -195,7 +195,7 @@ async def test_a_slow_synthesizer_falls_back_to_merging(monkeypatch: pytest.Monk
     monkeypatch.setattr(settings, "TASTE_SYNTH_TIMEOUT_SECONDS", 0.05)
     analysis = AnswerAnalysis(keywords=[WeightedKeyword(term="Frevo", weight=3)], summary="Gosta de frevo.")
 
-    def runnable(schema: Any, _: float) -> _Slow:
+    def runnable(schema: Any) -> _Slow:
         return _Slow(0, analysis) if schema is AnswerAnalysis else _Slow(1)
 
     monkeypatch.setattr(taste_agent, "_structured", runnable)
