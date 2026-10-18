@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -86,6 +86,11 @@ def _parse_embedding_from_rpc(payload: Any) -> list[float] | None:
                 return parsed
 
     return None
+
+
+# An event with no end counts as over 4 h after its start, like the imported ones
+# (`etl/transform.py:DEFAULT_EVENT_DURATION`), for "Meus eventos" (#40).
+_EVENT_WITHOUT_END_DURATION = timedelta(hours=4)
 
 
 class DBService:
@@ -1283,6 +1288,22 @@ class DBService:
         rows = r.json()
         return rows if isinstance(rows, list) else []
 
+    @staticmethod
+    def _ended_filter(when: str) -> tuple[str, str]:
+        """PostgREST `or` filter and order for events that ended (`past`) or not
+        (`upcoming`). The end is `ends_at`, or the start + 4 h without one (as imported
+        events close); an event with no date at all counts as upcoming."""
+        now = datetime.now(timezone.utc)
+        stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        start_cut = (now - _EVENT_WITHOUT_END_DURATION).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if when == "past":
+            return f"(ends_at.lt.{stamp},and(ends_at.is.null,event_date.lt.{start_cut}))", "desc"
+        return (
+            f"(ends_at.gte.{stamp},and(ends_at.is.null,event_date.gte.{start_cut}),"
+            "and(ends_at.is.null,event_date.is.null))",
+            "asc",
+        )
+
     async def get_events_by_creator(
         self,
         creator_id: str,
@@ -1290,22 +1311,62 @@ class DBService:
         *,
         limit: int = 50,
         offset: int = 0,
+        when: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Return events created by a specific user."""
+        """Return events created by a specific user.
+
+        Without `when`, newest created first (the original "Meus eventos"); with it,
+        only events that ended (`past`) or not (`upcoming`), by date (#40).
+        """
+        params = {
+            "creator_id": f"eq.{creator_id}",
+            "select": "*",
+            "order": "created_at.desc",
+            "limit": str(limit),
+            "offset": str(offset),
+        }
+        if when is not None:
+            ended, direction = self._ended_filter(when)
+            params.update({"kind": "eq.event", "or": ended, "order": f"event_date.{direction}"})
         r = await self._client.get(
             f"{REST_PREFIX}/events",
-            params={
-                "creator_id": f"eq.{creator_id}",
-                "select": "*",
-                "order": "created_at.desc",
-                "limit": str(limit),
-                "offset": str(offset),
-            },
+            params=params,
             headers=self._user_headers(jwt),
         )
         await self._raise_for_supabase(r)
         rows = r.json()
         return rows if isinstance(rows, list) else []
+
+    async def get_events_going(
+        self, user_id: str, jwt: str, *, when: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Events you are going to (#40): RSVP confirmed, waitlisted, called or admitted,
+        never cancelled nor no_show, and never places. Each row is the event with
+        `_rsvp` = your `{status, waitlist_position}`."""
+        params = {
+            "user_id": f"eq.{user_id}",
+            "status": "in.(confirmed,waitlisted,called,admitted)",
+            "select": "status,waitlist_position,events!inner(*)",
+            "events.kind": "eq.event",
+            "limit": str(limit),
+        }
+        direction = "asc"
+        if when is not None:
+            ended, direction = self._ended_filter(when)
+            params["events.or"] = ended
+        params["order"] = f"events(event_date).{direction}"
+        r = await self._client.get(
+            f"{REST_PREFIX}/event_rsvps", params=params, headers=self._user_headers(jwt)
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        out: list[dict[str, Any]] = []
+        for row in rows if isinstance(rows, list) else []:
+            event = row.get("events")
+            if isinstance(event, dict) and event.get("id"):
+                rsvp = {"status": row.get("status"), "waitlist_position": row.get("waitlist_position")}
+                out.append({**event, "_rsvp": rsvp})
+        return out
 
     async def get_user_trophies(
         self,
@@ -1317,7 +1378,7 @@ class DBService:
             f"{REST_PREFIX}/trophies",
             params={
                 "user_id": f"eq.{user_id}",
-                "select": "id,template_id,acquired_at,trophy_templates(name,description,icon_url)",
+                "select": "id,template_id,acquired_at,trophy_templates(name,description,icon_url,event_id)",
                 "order": "acquired_at.desc",
             },
             headers=self._user_headers(jwt),

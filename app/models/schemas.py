@@ -164,6 +164,8 @@ class EventRead(BaseModel):
     waitlist_enabled: bool = True
     call_ttl_minutes: int = Field(default=10, ge=1, le=240)
     capacity_state: "EventCapacityRead | None" = None
+    # Your own RSVP, only in "Meus eventos" (`GET /events/mine`, #40).
+    my_rsvp: "MyRsvpRead | None" = None
     is_boosted: bool = False
     boost_expires_at: datetime | None = None
     created_at: datetime | None = None
@@ -266,6 +268,8 @@ class TrophyRead(BaseModel):
     description: str | None = None
     icon_url: str | None = None
     acquired_at: datetime | None = None
+    # The event (or place) the trophy came from; the app links to it (#40).
+    event_id: str | None = None
 
 
 class FollowRequest(BaseModel):
@@ -577,6 +581,21 @@ class RsvpWithProfile(RsvpRead):
     """Queue entry with the attendee's public profile (creator-facing lists)."""
 
     profile: ProfileBrief
+
+
+# "Meus eventos" (#40): what you created, what you are going to, or both; split at
+# the end of the event.
+MyEventsRole = Literal["created", "going", "all"]
+MyEventsWhen = Literal["upcoming", "past"]
+
+
+class MyRsvpRead(BaseModel):
+    """Your RSVP to an event in "Meus eventos"."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: RsvpStatus
+    waitlist_position: int | None = None
 
 
 class EventCapacityRead(BaseModel):
