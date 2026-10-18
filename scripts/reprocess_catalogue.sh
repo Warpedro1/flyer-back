@@ -16,9 +16,11 @@ API="${FLYER_API:-https://flyer-back.vercel.app}"
 read -rsp "ADMIN_INGEST_TOKEN: " TOKEN
 echo
 
+# The header goes through a file descriptor (printf is a builtin), so the token
+# never shows in the process list.
 call() {
   curl -sS --fail-with-body -X POST "$API/admin/events/$1" \
-    -H "X-Admin-Token: $TOKEN" -H 'content-type: application/json' -d "$2"
+    -H @<(printf 'X-Admin-Token: %s\n' "$TOKEN") -H 'content-type: application/json' -d "$2"
 }
 
 field() {
@@ -64,7 +66,11 @@ fi
 echo
 
 echo "2. Palavras-chave. Estimativa (nada é gasto):"
-estimate=$(call keywords '{}')
+if ! estimate=$(call keywords '{}'); then
+  echo "$estimate"
+  echo "A estimativa falhou; rode de novo daqui a pouco."
+  exit 1
+fi
 echo "$estimate"
 read -rp "Rodar as palavras-chave agora? (s/N) " answer
 [ "$answer" = "s" ] || { echo "Palavras-chave não rodadas."; exit 0; }
