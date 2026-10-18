@@ -513,6 +513,24 @@ class EventUpdate(_EventFields):
     """Payload for editing one event (one date of a series): no recurrence."""
 
 
+class EventDescribeRequest(BaseModel):
+    """What "Melhorar descrição" works from (#22 C): only what the creator wrote."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    category: EventCategory | None = None
+
+
+class EventDescribeRead(BaseModel):
+    """A suggestion the creator may use or ignore; nothing is saved."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: str
+
+
 class EventMediaEdit(BaseModel):
     """A media item in the edit form: the stored path plus a signed preview."""
 

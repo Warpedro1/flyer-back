@@ -88,9 +88,14 @@ def test_own_storage_paths_pass() -> None:
     require_media_paths_owned("user-1", ["user-1/a.jpg", "user-1/b.mp4"])
 
 
-def test_absolute_urls_pass_through() -> None:
-    # Legacy media are full URLs: they are never signed, so they expose nothing.
-    require_media_paths_owned("user-1", ["https://cdn.example.com/a.jpg"])
+@pytest.mark.parametrize("url", ["https://cdn.example.com/a.jpg", "http://cdn.example.com/a.mp4"])
+def test_external_urls_are_refused(url: str) -> None:
+    # #22 A: an external file reaches every viewer unchecked and can change after
+    # the moderation saw it. (No event had one in production, checked 2026-10-18.)
+    with pytest.raises(HTTPException) as exc:
+        require_media_paths_owned("user-1", ["user-1/ok.jpg", url])
+
+    assert exc.value.status_code == 422
 
 
 @pytest.mark.parametrize(

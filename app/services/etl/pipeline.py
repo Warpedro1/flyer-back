@@ -14,6 +14,7 @@ from app.services.etl.load import link_events_to_places, upsert_events
 from app.services.etl.schemas import IngestionReport, StandardizedEvent
 from app.services.etl.sources import ApifySource
 from app.services.event_keywords import EMBED_BATCH, reprocess_stale
+from app.services.moderation import redact_import
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +56,19 @@ async def ingest_dataset(
             events.append(ev)
     report.standardized = len(events)
 
+    # LGPD (#22 A): contacts in the texts never enter, before anything is hashed.
+    for i, ev in enumerate(events):
+        title, description, changed = redact_import(ev.title, ev.description)
+        if changed:
+            events[i] = ev.model_copy(update={"title": title, "description": description})
+            report.contacts_removed += 1
+
     try:
-        report.upserted = await upsert_events(db, events)
+        loaded = await upsert_events(db, events)
+        report.upserted = loaded.upserted
+        report.blocked = loaded.blocked
+        report.moderation_pending = loaded.pending
+        report.covers_removed = loaded.covers_removed
         report.linked = await link_events_to_places(db, events)
     except Exception as exc:
         logger.exception("ETL load failed (source=%s, dataset=%s)", source.name, dataset_id)
@@ -75,8 +87,10 @@ async def ingest_dataset(
             report.errors.append(f"keywords: {exc}")
 
     logger.info(
-        "ETL run done: source=%s fetched=%d standardized=%d upserted=%d linked=%d keywords=%d errors=%d",
+        "ETL run done: source=%s fetched=%d standardized=%d upserted=%d linked=%d keywords=%d "
+        "blocked=%d moderation_pending=%d covers_removed=%d contacts_removed=%d errors=%d",
         report.source, report.fetched, report.standardized, report.upserted, report.linked,
-        report.keywords, len(report.errors),
+        report.keywords, report.blocked, report.moderation_pending, report.covers_removed,
+        report.contacts_removed, len(report.errors),
     )
     return report

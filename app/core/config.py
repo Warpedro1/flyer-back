@@ -130,6 +130,13 @@ class Settings(BaseSettings):
     # until the owner approves the backlog's estimated cost (decision 2026-10-18):
     # the first imports would otherwise pay for rows nobody approved.
     KEYWORDS_ON_IMPORT: bool = False
+    # Moderation of what an import brings new or changed (#22 A); what does not fit
+    # waits for the next import or POST /admin/events/moderation.
+    IMPORT_MODERATION_BUDGET_SECONDS: float = Field(default=15.0, ge=3.0, le=30.0)
+    # "Melhorar descrição" (#22 C): free for everybody, 10 an hour per person
+    # (decision 2026-10-18).
+    DESCRIBE_MODEL: str = "gpt-4o-mini"
+    DESCRIBE_TIMEOUT_SECONDS: float = Field(default=20.0, ge=5.0, le=45.0)
     # OpenAI shut down text-moderation-latest on 2025-10-27 (#26).
     MODERATION_MODEL: str = "omni-moderation-latest"
     # Number of per-step taste docs retrieved and injected into the chat system prompt.
