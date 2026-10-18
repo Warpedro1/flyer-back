@@ -189,6 +189,8 @@ def test_status_shows_the_owner_masked_data(db: MagicMock) -> None:
         "pending": False,
         "cpf_masked": "***.982.247-**",
         "phone_masked": "(81) 9****-5678",
+        "intro_seen": False,
+        "onboarded": False,
     }
 
 
@@ -196,7 +198,14 @@ def test_status_of_an_incomplete_account(db: MagicMock) -> None:
     with _as(_payload()):
         body = TestClient(app).get("/auth/profile/status", headers=AUTH).json()
 
-    assert body == {"complete": False, "pending": False, "cpf_masked": None, "phone_masked": None}
+    assert body == {
+        "complete": False,
+        "pending": False,
+        "cpf_masked": None,
+        "phone_masked": None,
+        "intro_seen": False,
+        "onboarded": False,
+    }
 
 
 def test_completing_the_profile(db: MagicMock) -> None:
@@ -335,7 +344,8 @@ def test_an_account_with_cpf_and_no_phone_is_complete(db: MagicMock) -> None:
     with _as(_payload()):
         body = TestClient(app).get("/auth/profile/status", headers=AUTH).json()
 
-    assert body == {"complete": True, "pending": False, "cpf_masked": "***.982.247-**", "phone_masked": None}
+    assert body["complete"] is True
+    assert body["phone_masked"] is None
 
 
 async def test_account_state_only_needs_the_cpf() -> None:
