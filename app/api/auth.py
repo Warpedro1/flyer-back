@@ -169,8 +169,22 @@ async def profile_status(
     if complete and not pending:
         remember_complete_profile(user_id)
     return ProfileIdentityStatus(
-        complete=complete, pending=pending, cpf_masked=mask_cpf(cpf), phone_masked=mask_phone(phone)
+        complete=complete,
+        pending=pending,
+        cpf_masked=mask_cpf(cpf),
+        phone_masked=mask_phone(phone),
+        intro_seen=bool(identity.get("intro_seen_at")),
+        onboarded=bool(identity.get("onboarding_preferences_hash")),
     )
+
+
+@router.post("/profile/intro-seen", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit("10/minute")
+async def intro_seen(request: Request, user_id: PendingProfileDep, db: DbServiceDep) -> Response:
+    """The introduction tour was finished or skipped (Warpedro1/flyer#23): never shown
+    again, on any device. Idempotent."""
+    await db.mark_intro_seen(user_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.put("/profile/identity", status_code=status.HTTP_204_NO_CONTENT)

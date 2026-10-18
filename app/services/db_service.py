@@ -345,7 +345,11 @@ class DBService:
         the sign-up still waits for its code."""
         r = await self._client.get(
             f"{REST_PREFIX}/profiles",
-            params={"id": f"eq.{user_id}", "select": "cpf,phone,signup_pending", "limit": "1"},
+            params={
+                "id": f"eq.{user_id}",
+                "select": "cpf,phone,signup_pending,intro_seen_at,onboarding_preferences_hash",
+                "limit": "1",
+            },
             headers=self._admin_headers(),
         )
         await self._raise_for_supabase(r)
@@ -353,6 +357,17 @@ class DBService:
         if isinstance(rows, list) and rows:
             return dict(rows[0])
         return {"cpf": None, "phone": None, "signup_pending": False}
+
+    async def mark_intro_seen(self, user_id: str) -> None:
+        """Record that the introduction tour was finished or skipped (Warpedro1/flyer#23).
+        Only the first time: a repeat keeps the original date."""
+        r = await self._client.patch(
+            f"{REST_PREFIX}/profiles",
+            params={"id": f"eq.{user_id}", "intro_seen_at": "is.null"},
+            json={"intro_seen_at": datetime.now(timezone.utc).isoformat()},
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
 
     async def get_account_state(self, user_id: str) -> str:
         """`pending` (sign-up without its code), `incomplete` (no CPF) or `ok`.
