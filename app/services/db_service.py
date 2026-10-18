@@ -1261,6 +1261,87 @@ class DBService:
         )
         await self._raise_for_supabase(r)
 
+    async def set_events_keywords(
+        self,
+        event_ids: list[str],
+        *,
+        keywords: list[str],
+        summary: str,
+        keywords_hash: str,
+        vector: list[float],
+    ) -> None:
+        """The taste agent's keywords (#22 B) and the vector made from them, in one PATCH.
+
+        Always together: keywords written without their vector would mark the row
+        fresh while it still has the old one.
+        """
+        if not event_ids:
+            return
+        body = {
+            "keywords": keywords,
+            "keywords_summary": summary,
+            "keywords_hash": keywords_hash,
+            "event_embedding": vector,
+        }
+        joined = ",".join(event_ids)
+        r = await self._client.patch(
+            f"{REST_PREFIX}/events",
+            params={"id": f"in.({joined})"},
+            json=body,
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+
+    async def list_stale_keyword_events(self, *, limit: int, offset: int = 0) -> list[dict[str, Any]]:
+        """Events and places whose keywords are missing or no longer match their text
+        (generated column ``keywords_stale``). Only what the agent reads."""
+        r = await self._client.get(
+            f"{REST_PREFIX}/events",
+            params={
+                "keywords_stale": "is.true",
+                "select": "id,kind,title,description,category",
+                "order": "id.asc",
+                "limit": str(limit),
+                "offset": str(offset),
+            },
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        return rows if isinstance(rows, list) else []
+
+    async def list_source_keywords(self, source: str) -> dict[str, dict[str, Any]]:
+        """Stored keywords of a source's imports, by ``source_event_id`` (ETL only).
+
+        A re-import reuses them when the text did not change, so the vector stays made
+        from keywords without calling the LLM again.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        offset, page = 0, 1000
+        while True:
+            r = await self._client.get(
+                f"{REST_PREFIX}/events",
+                params={
+                    "source": f"eq.{source}",
+                    "keywords_hash": "not.is.null",
+                    "select": "source_event_id,keywords,keywords_summary,keywords_hash",
+                    "order": "id.asc",
+                    "limit": str(page),
+                    "offset": str(offset),
+                },
+                headers=self._admin_headers(),
+            )
+            await self._raise_for_supabase(r)
+            rows = r.json()
+            if not isinstance(rows, list):
+                break
+            for row in rows:
+                out[str(row.get("source_event_id"))] = row
+            if len(rows) < page:
+                break
+            offset += page
+        return out
+
     async def get_event_by_id(
         self,
         event_id: str,

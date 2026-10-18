@@ -51,4 +51,6 @@ class IngestionReport(BaseModel):
     standardized: int = 0
     upserted: int = 0
     linked: int = 0
+    # Rows given keywords and a new vector in this run (#22 B).
+    keywords: int = 0
     errors: list[str] = Field(default_factory=list)

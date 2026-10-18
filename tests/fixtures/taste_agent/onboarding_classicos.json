@@ -1,0 +1,17 @@
+{
+  "description": "A resposta da ilha deserta da #26 (livro, filme e música), com respostas curtas nas outras perguntas.",
+  "answers": {
+    "free_time": "ler e ir ao cinema",
+    "ideal_weekend": "um café com amigos e um bom debate",
+    "hobby_to_start": "um clube do livro",
+    "favorite_media": "mil e uma noites, o conde de monte cristo, faroeste caboclo",
+    "one_food_forever": "comida árabe",
+    "sleep_preference": "acordar cedo"
+  },
+  "expected_any": [
+    ["literatura", "livros", "leitura", "literatura clássica", "clube do livro"],
+    ["clássicos", "clássico", "cinema clássico", "filmes clássicos", "literatura clássica"],
+    ["música brasileira", "mpb", "rock nacional", "rock brasileiro", "música brasileira clássica"],
+    ["debates", "debate", "eventos intelectuais", "conversas"]
+  ]
+}

@@ -79,6 +79,24 @@ async def test_ensure_interest_embedding_rebuilds_from_preferences_text() -> Non
     db.update_profile_embedding.assert_awaited_once_with("u1", vec)
 
 
+async def test_ensure_interest_embedding_prefers_the_stored_keywords() -> None:
+    # #31: the keywords are stored so a vector can be rebuilt without the LLM.
+    db = MagicMock()
+    db.update_profile_embedding = AsyncMock()
+    profile = {
+        "id": "u1",
+        "interest_keywords": ["literatura clássica", "debates"],
+        "interest_summary": "Gosta de clássicos.",
+        "onboarding_preferences_text": "- Tempo livre: ler",
+    }
+    embed = AsyncMock(return_value=[0.1] * 1536)
+
+    with patch("app.services.onboarding_pipeline.ai_service.generate_embedding", embed):
+        await ensure_interest_embedding(db, "u1", "jwt", profile)
+
+    assert embed.await_args.args[0] == "Palavras-chave: literatura clássica, debates.\nResumo: Gosta de clássicos."
+
+
 @pytest.mark.asyncio
 async def test_ensure_interest_embedding_returns_none_without_preferences_text() -> None:
     db = MagicMock()
