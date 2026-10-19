@@ -36,6 +36,8 @@ class StandardizedEvent(BaseModel):
     price: Decimal | None = Field(default=None, ge=0)
     price_level: int | None = Field(default=None, ge=1, le=4)
     rating: Decimal | None = Field(default=None, ge=0, le=5)
+    # Places: how many Google reviews (the popularity signal, decision 2026-10-19).
+    reviews_count: int | None = Field(default=None, ge=0)
     opening_hours: list[OpeningHours] | None = None
     source_url: str | None = Field(default=None, max_length=2000)
     cover_url: str | None = Field(default=None, max_length=2000)
@@ -51,6 +53,8 @@ class IngestionReport(BaseModel):
     standardized: int = 0
     upserted: int = 0
     linked: int = 0
+    # Places left out for too few reviews or a low rating (decision 2026-10-19).
+    not_popular: int = 0
     # Rows given keywords and a new vector in this run (#22 B).
     keywords: int = 0
     # Moderation (#22 A): refused (never entered, or hidden), not checked in time,

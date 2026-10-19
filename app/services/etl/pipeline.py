@@ -48,13 +48,23 @@ async def ingest_dataset(
 
     events: list[StandardizedEvent] = []
     seen: set[str] = set()
+    left_out: set[str] = set()
     for item in raw:
         ev = source.transform(item)
         # The same place can come from two searches; one row per source id.
-        if ev is not None and ev.source_event_id not in seen:
-            seen.add(ev.source_event_id)
-            events.append(ev)
+        if ev is None or ev.source_event_id in seen:
+            continue
+        # Only what pleases most people (decision 2026-10-19). Another search may
+        # still bring the same place in, with a lower bar.
+        if not source.keep(item, ev):
+            left_out.add(ev.source_event_id)
+            continue
+        seen.add(ev.source_event_id)
+        events.append(ev)
     report.standardized = len(events)
+    report.not_popular = len(left_out - seen)
+    # Most popular first: the moderation and keyword budgets reach those first.
+    events.sort(key=source.rank)
 
     # LGPD (#22 A): contacts in the texts never enter, before anything is hashed.
     for i, ev in enumerate(events):
@@ -87,10 +97,10 @@ async def ingest_dataset(
             report.errors.append(f"keywords: {exc}")
 
     logger.info(
-        "ETL run done: source=%s fetched=%d standardized=%d upserted=%d linked=%d keywords=%d "
-        "blocked=%d moderation_pending=%d covers_removed=%d contacts_removed=%d errors=%d",
-        report.source, report.fetched, report.standardized, report.upserted, report.linked,
-        report.keywords, report.blocked, report.moderation_pending, report.covers_removed,
-        report.contacts_removed, len(report.errors),
+        "ETL run done: source=%s fetched=%d standardized=%d not_popular=%d upserted=%d linked=%d "
+        "keywords=%d blocked=%d moderation_pending=%d covers_removed=%d contacts_removed=%d errors=%d",
+        report.source, report.fetched, report.standardized, report.not_popular, report.upserted,
+        report.linked, report.keywords, report.blocked, report.moderation_pending,
+        report.covers_removed, report.contacts_removed, len(report.errors),
     )
     return report

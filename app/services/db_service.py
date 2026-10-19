@@ -1306,7 +1306,9 @@ class DBService:
                 # Hidden rows need no keywords (#22 A).
                 "moderation_blocked": "is.false",
                 "select": "id,kind,title,description,category",
-                "order": "id.asc",
+                # The most reviewed places first (decision 2026-10-19); the id keeps
+                # the pages stable.
+                "order": "reviews_count.desc.nullslast,id.asc",
                 "limit": str(limit),
                 "offset": str(offset),
             },

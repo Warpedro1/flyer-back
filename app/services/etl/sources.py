@@ -1,32 +1,52 @@
 """The Apify actors the catalogue is built from, and what each run asks for.
 
-Pilot (decision 2026-10-11, budget ~3 USD): Google Maps places in four areas of
-Recife, one search per category, and the Sympla events in Recife. Each source has a
-charge cap that Apify enforces on the run itself.
+Google Maps places in Recife and the Sympla events in Recife, each with a charge cap
+that Apify enforces on the run itself (decision 2026-10-11: ~3 USD a round). What
+pleases most people comes first (decision 2026-10-19): the searches favour the
+city's icons, broad leisure and popular food and drink (`taxonomy.PLACE_SEARCHES`),
+only popular places come in (`keep`), and each run is loaded most popular first
+(`rank`), so the moderation and keyword budgets of the import reach those first.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Literal
 
+from app.core.config import settings
 from app.services.etl.schemas import RawEvent, StandardizedEvent
-from app.services.etl.taxonomy import PILOT_SEARCHES
-from app.services.etl.transform import transform_google_place, transform_sympla_event
+from app.services.etl.taxonomy import BROAD_APPEAL_CATEGORIES, PLACE_SEARCHES
+from app.services.etl.transform import popular_place, transform_google_place, transform_sympla_event
 
-__all__ = ["PILOT_AREAS", "PILOT_SEARCHES", "SOURCES", "ApifySource"]
+__all__ = ["AREAS", "CITY", "SOURCES", "ApifySource"]
 
 SourceName = Literal["google_maps", "sympla"]
 
-PILOT_AREAS: tuple[str, ...] = (
+CITY = "em Recife"
+# Where the food and drink searches run one by one (`PlaceSearch.per_area`).
+AREAS: tuple[str, ...] = (
     "em Boa Viagem, Recife",
     "no Bairro do Recife, Boa Vista e Santo Amaro, Recife",
     "nas Graças, Espinheiro e Aflitos, Recife",
     "em Casa Forte, Parnamirim e Poço, Recife",
 )
 
-PLACES_PER_SEARCH = 10
+# 26 searches × 20 = 520 places at most, under the 600 the cap pays for. Google
+# lists the most prominent first; `keep` then leaves out the ones few people rate.
+PLACES_PER_SEARCH = 20
+
+_LAST = datetime.max.replace(tzinfo=timezone.utc)
+
+
+def _keep_all(item: RawEvent, ev: StandardizedEvent) -> bool:
+    return True
+
+
+def _as_loaded(ev: StandardizedEvent) -> tuple[Any, ...]:
+    return ()
 
 
 @dataclass(frozen=True)
@@ -36,14 +56,44 @@ class ApifySource:
     max_charge_usd: float
     build_input: Callable[[], dict[str, Any]]
     transform: Callable[[RawEvent], StandardizedEvent | None]
+    # Whether a transformed item comes in at all, and the order the run is loaded in.
+    keep: Callable[[RawEvent, StandardizedEvent], bool] = _keep_all
+    rank: Callable[[StandardizedEvent], tuple[Any, ...]] = _as_loaded
 
     def run_input(self) -> dict[str, Any]:
         return self.build_input()
 
 
+def _place_searches() -> list[str]:
+    return [
+        f"{entry.term} {area}"
+        for entry in PLACE_SEARCHES
+        for area in (AREAS if entry.per_area else (CITY,))
+    ]
+
+
+def _popular_place(item: RawEvent, ev: StandardizedEvent) -> bool:
+    return popular_place(
+        item,
+        ev,
+        min_reviews=settings.PLACES_MIN_REVIEWS,
+        min_reviews_niche=settings.PLACES_MIN_REVIEWS_NICHE,
+        min_rating=settings.PLACES_MIN_RATING,
+    )
+
+
+def _most_reviewed_first(ev: StandardizedEvent) -> tuple[Any, ...]:
+    # Unknown counts last, then the better rated among equals.
+    return (ev.reviews_count is None, -(ev.reviews_count or 0), -(ev.rating or Decimal(0)))
+
+
+def _broad_appeal_first(ev: StandardizedEvent) -> tuple[Any, ...]:
+    return (ev.category not in BROAD_APPEAL_CATEGORIES, ev.event_date or _LAST)
+
+
 def _google_maps_input() -> dict[str, Any]:
     return {
-        "searchStringsArray": [f"{search} {area}" for search, _ in PILOT_SEARCHES for area in PILOT_AREAS],
+        "searchStringsArray": _place_searches(),
         "maxCrawledPlacesPerSearch": PLACES_PER_SEARCH,
         "language": "pt-BR",
         "countryCode": "br",
@@ -57,7 +107,8 @@ def _sympla_input() -> dict[str, Any]:
         "stateFilter": "PE",
         "cityFilter": "recife",
         "eventTypeFilter": "NORMAL",
-        "maxItems": 80,
+        # 70 × 0.008 USD fits under the cap; 80 went past it and Apify cut the run.
+        "maxItems": 70,
         # Details carry the ticket prices; without them every price is unknown.
         "getEventDetails": True,
     }
@@ -71,13 +122,17 @@ SOURCES: dict[str, ApifySource] = {
         max_charge_usd=2.4,
         build_input=_google_maps_input,
         transform=transform_google_place,
+        keep=_popular_place,
+        rank=_most_reviewed_first,
     ),
     "sympla": ApifySource(
         name="sympla",
         actor="hypebridge~sympla-events-scraper",
-        # 80 detailed events at 0.008 USD, plus the start fee.
+        # 70 detailed events at 0.008 USD, plus the start fee. Nothing is left out
+        # (decision 2026-10-19): only the order changes.
         max_charge_usd=0.6,
         build_input=_sympla_input,
         transform=transform_sympla_event,
+        rank=_broad_appeal_first,
     ),
 }

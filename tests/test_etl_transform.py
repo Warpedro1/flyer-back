@@ -13,11 +13,13 @@ from typing import Any
 import pytest
 
 from app.models.schemas import EVENT_CATEGORIES
-from app.services.etl.sources import PILOT_SEARCHES
+from app.services.etl.taxonomy import BROAD_APPEAL_CATEGORIES, PLACE_SEARCHES
 from app.services.etl.transform import (
     clean_description,
     google_category,
     google_price_level,
+    place_search,
+    popular_place,
     sympla_category,
     sympla_price,
     transform_google_place,
@@ -36,6 +38,7 @@ def google_item(**overrides: Any) -> dict[str, Any]:
         "address": "Av. Fernando Simões Barbosa, 1200 - Boa Viagem, Recife - PE",
         "price": "R$ 50–100",
         "totalScore": 4.6,
+        "reviewsCount": 4321,
         "openingHours": [{"day": "segunda-feira", "hours": "11:30 a 22:00"}],
         "url": "https://www.google.com/maps/search/?api=1&query_place_id=ChIJ-parraxaxa",
         "imageUrl": "https://lh5.googleusercontent.com/p/parraxaxa",
@@ -77,16 +80,42 @@ def sympla_item(**overrides: Any) -> dict[str, Any]:
 # ------------------------------------------------------------ categories --
 
 
-def test_every_pilot_search_maps_to_a_known_category() -> None:
-    assert {slug for _, slug in PILOT_SEARCHES} <= set(EVENT_CATEGORIES)
+def test_every_search_maps_to_a_known_category() -> None:
+    assert {s.category for s in PLACE_SEARCHES} <= set(EVENT_CATEGORIES)
+    assert BROAD_APPEAL_CATEGORIES <= set(EVENT_CATEGORIES)
+
+
+def test_no_search_is_the_start_of_another() -> None:
+    # The category comes from the search's prefix: one must never swallow another.
+    terms = [s.term for s in PLACE_SEARCHES]
+    assert len(set(terms)) == len(terms)
+    assert not [(a, b) for a in terms for b in terms if a != b and b.startswith(a + " ")]
+
+
+@pytest.mark.parametrize(
+    ("search", "term", "tier"),
+    [
+        ("parques em Recife", "parques", "broad"),
+        ("restaurantes em Boa Viagem, Recife", "restaurantes", "broad"),
+        ("yoga e spa em Recife", "yoga e spa", "niche"),
+        ("Pontos Turísticos em Recife", "pontos turísticos", "broad"),
+        ("oficinas mecânicas em Recife", None, None),
+        (None, None, None),
+    ],
+)
+def test_the_search_that_found_a_place(search: str | None, term: str | None, tier: str | None) -> None:
+    found = place_search(search)
+
+    assert (found.term if found else None, found.tier if found else None) == (term, tier)
 
 
 @pytest.mark.parametrize(
     ("search", "category_name", "expected"),
     [
         # The search that found the place decides: it was chosen for that category.
-        ("academias em Boa Viagem, Recife", "Academia", "academia_exercicio"),
-        ("praias e parques em Boa Viagem, Recife", "Parque", "praia_natureza"),
+        ("academias em Recife", "Academia", "academia_exercicio"),
+        ("parques em Recife", "Parque", "praia_natureza"),
+        ("bares em Boa Viagem, Recife", "Restaurante", "vida_noturna"),
         # Without a known search, Google's own category is mapped.
         (None, "Livraria", "estudo_leitura"),
         (None, "Bar", "vida_noturna"),
@@ -175,6 +204,7 @@ def test_a_google_place_becomes_a_place_with_source_coordinates() -> None:
     assert place.price is None
     assert place.event_date is None
     assert place.rating == Decimal("4.6")
+    assert place.reviews_count == 4321
     assert place.location_name == "Av. Fernando Simões Barbosa, 1200 - Boa Viagem, Recife - PE"
     assert [h.model_dump() for h in place.opening_hours or []] == [
         {"day": "segunda-feira", "hours": "11:30 a 22:00"}
@@ -195,6 +225,45 @@ def test_a_google_place_becomes_a_place_with_source_coordinates() -> None:
 )
 def test_google_places_that_cannot_be_used_are_dropped(overrides: dict[str, Any]) -> None:
     assert transform_google_place(google_item(**overrides)) is None
+
+
+@pytest.mark.parametrize("reviews", [None, "4321", True, -3, 12.5])
+def test_a_review_count_that_is_not_a_count_is_unknown(reviews: Any) -> None:
+    place = transform_google_place(google_item(reviewsCount=reviews))
+
+    assert place is not None
+    assert place.reviews_count is None
+
+
+# ------------------------------------------------------------- popularity --
+
+BARS = {"min_reviews": 300, "min_reviews_niche": 50, "min_rating": 4.2}
+
+
+@pytest.mark.parametrize(
+    ("search", "reviews", "score", "kept"),
+    [
+        # Decision 2026-10-19: what pleases most people, by reviews and rating.
+        ("parques em Recife", 300, 4.2, True),
+        ("parques em Recife", 299, 4.9, False),
+        ("restaurantes em Boa Viagem, Recife", 5000, 4.1, False),
+        # Niches still come, with a lower bar.
+        ("yoga e spa em Recife", 50, 4.8, True),
+        ("yoga e spa em Recife", 49, 4.8, False),
+        ("yoga e spa em Recife", 80, 3.9, False),
+        # A search we do not know gets the broad bar.
+        ("oficinas mecânicas em Recife", 120, 4.5, False),
+        # Unknown is not unpopular: kept (and ranked last).
+        ("parques em Recife", None, 4.5, True),
+        ("parques em Recife", 900, None, True),
+    ],
+)
+def test_only_popular_places_are_kept(search: str, reviews: int | None, score: float | None, kept: bool) -> None:
+    item = google_item(searchString=search, reviewsCount=reviews, totalScore=score)
+    place = transform_google_place(item)
+
+    assert place is not None
+    assert popular_place(item, place, **BARS) is kept
 
 
 # ----------------------------------------------------------------- events --

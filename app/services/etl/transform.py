@@ -18,7 +18,7 @@ from pydantic import ValidationError
 
 from app.models.schemas import EventCategory
 from app.services.etl.schemas import RawEvent, StandardizedEvent
-from app.services.etl.taxonomy import GOOGLE_KEYWORDS, PILOT_SEARCHES, SYMPLA_KEYWORDS
+from app.services.etl.taxonomy import GOOGLE_KEYWORDS, PLACE_SEARCHES, SYMPLA_KEYWORDS, PlaceSearch
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,12 @@ def _str(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _count(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def _float(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -103,12 +109,20 @@ def _build(data: dict[str, Any]) -> StandardizedEvent | None:
 # ------------------------------------------------------------ categories --
 
 
-def google_category(search: str | None, category_name: str | None) -> EventCategory:
-    """The pilot search that found the place, else Google's own category, else `outros`."""
+def place_search(search: str | None) -> PlaceSearch | None:
+    """Which of our searches found the place (Apify echoes it in ``searchString``)."""
     wanted = normalize(search)
-    for query, category in PILOT_SEARCHES:
-        if wanted.startswith(normalize(query) + " "):
-            return category
+    for entry in PLACE_SEARCHES:
+        if wanted.startswith(normalize(entry.term) + " "):
+            return entry
+    return None
+
+
+def google_category(search: str | None, category_name: str | None) -> EventCategory:
+    """The search that found the place, else Google's own category, else `outros`."""
+    found = place_search(search)
+    if found:
+        return found.category
     return _first_keyword(normalize(category_name), GOOGLE_KEYWORDS) or "outros"
 
 
@@ -197,11 +211,35 @@ def transform_google_place(item: RawEvent) -> StandardizedEvent | None:
             "long": lng,
             "price_level": google_price_level(_str(item.get("price"))),
             "rating": Decimal(str(score)).quantize(Decimal("0.1")) if score is not None else None,
+            "reviews_count": _count(item.get("reviewsCount")),
             "opening_hours": opening_hours,
             "source_url": _text(item.get("url"), 2000),
             "cover_url": _text(item.get("imageUrl"), 2000),
         }
     )
+
+
+def popular_place(
+    item: RawEvent,
+    place: StandardizedEvent,
+    *,
+    min_reviews: int,
+    min_reviews_niche: int,
+    min_rating: float,
+) -> bool:
+    """Whether a place is popular enough to come in (decision 2026-10-19).
+
+    Enough Google reviews for its search's tier (a search we do not know gets the
+    broad bar) and, when it has a score, a good one. A place whose review count the
+    source did not give is kept: unknown is not unpopular, and it is ranked last.
+    """
+    if place.reviews_count is None:
+        return True
+    found = place_search(_str(item.get("searchString")))
+    needed = min_reviews_niche if found and found.tier == "niche" else min_reviews
+    if place.reviews_count < needed:
+        return False
+    return place.rating is None or float(place.rating) >= min_rating
 
 
 # ----------------------------------------------------------------- events --

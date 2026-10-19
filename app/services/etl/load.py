@@ -95,6 +95,7 @@ def _row(ev: StandardizedEvent, embedding: list[float] | None) -> dict[str, Any]
         "price": str(ev.price) if ev.price is not None else None,
         "price_level": ev.price_level,
         "rating": str(ev.rating) if ev.rating is not None else None,
+        "reviews_count": ev.reviews_count,
         "opening_hours": [h.model_dump() for h in ev.opening_hours] if ev.opening_hours else None,
         "source_url": ev.source_url,
         "cover_url": ev.cover_url,

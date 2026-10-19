@@ -81,6 +81,17 @@ async def test_rows_carry_provenance_and_the_place_fields() -> None:
     assert row["event_embedding"] == VEC
 
 
+async def test_rows_carry_the_review_count() -> None:
+    db = _db()
+
+    with patch("app.services.etl.load.ai_service.generate_embeddings", AsyncMock(return_value=[VEC, VEC])):
+        await upsert_events(db, [_place(reviews_count=4321), _event(1)])
+
+    place_row, event_row = db.upsert_events.await_args.args[0]
+    assert place_row["reviews_count"] == 4321
+    assert event_row["reviews_count"] is None
+
+
 async def test_every_row_has_the_same_keys_and_never_touches_place_id() -> None:
     # PostgREST takes the columns of a bulk insert from the rows; and a re-import
     # must not undo a link the creator made by hand.
