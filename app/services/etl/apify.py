@@ -1,4 +1,4 @@
-"""The two Apify API calls the ingestion needs, over the app's shared httpx client."""
+"""The Apify API calls the ingestion needs, over the app's shared httpx client."""
 
 from __future__ import annotations
 
@@ -52,6 +52,17 @@ async def start_run(
     r.raise_for_status()
     data = r.json().get("data")
     return data if isinstance(data, dict) else {}
+
+
+async def monthly_usage(http: httpx.AsyncClient, token: str) -> tuple[float, float | None]:
+    """What the account has spent in the current monthly cycle (USD), and its own
+    monthly limit when it has one."""
+    r = await http.get(f"{APIFY_BASE}/users/me/limits", headers=_auth(token), timeout=15.0)
+    r.raise_for_status()
+    data = r.json().get("data") or {}
+    used = float((data.get("current") or {}).get("monthlyUsageUsd") or 0.0)
+    limit = (data.get("limits") or {}).get("maxMonthlyUsageUsd")
+    return used, float(limit) if limit is not None else None
 
 
 async def fetch_dataset_items(http: httpx.AsyncClient, token: str, dataset_id: str) -> list[dict[str, Any]]:

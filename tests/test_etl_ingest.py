@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -21,7 +22,7 @@ from app.api.deps import get_db_service, get_http_client
 from app.core.config import settings
 from app.core.limiter import limiter
 from app.main import app
-from app.services.etl.apify import fetch_dataset_items, start_run
+from app.services.etl.apify import fetch_dataset_items, monthly_usage, start_run
 from app.services.etl.load import LoadResult
 from app.services.etl.pipeline import ingest_dataset
 from app.services.etl.schemas import IngestionReport
@@ -74,6 +75,22 @@ async def test_dataset_items_are_read_page_by_page() -> None:
     assert len(items) == 1001
     offsets = [c.kwargs["params"]["offset"] for c in http.get.await_args_list]
     assert offsets == [0, 1000]
+
+
+async def test_the_months_usage_comes_from_the_account_limits() -> None:
+    http = MagicMock()
+    http.get = AsyncMock(
+        return_value=_response(
+            "GET",
+            {"data": {"limits": {"maxMonthlyUsageUsd": 5}, "current": {"monthlyUsageUsd": 1.234}}},
+        )
+    )
+
+    used, limit = await monthly_usage(http, "apify-token")
+
+    assert (used, limit) == (1.234, 5.0)
+    assert http.get.await_args.args[0] == "https://api.apify.com/v2/users/me/limits"
+    assert http.get.await_args.kwargs["headers"]["Authorization"] == "Bearer apify-token"
 
 
 def test_the_pilot_stays_within_its_budget() -> None:
@@ -134,17 +151,84 @@ def configured(monkeypatch: pytest.MonkeyPatch) -> Iterator[MagicMock]:
 def test_admin_ingest_starts_a_run(configured: MagicMock) -> None:
     run = AsyncMock(return_value={"id": "run-1", "status": "READY"})
 
-    with patch("app.api.admin.start_run", run):
+    with (
+        patch("app.api.admin.start_run", run),
+        patch("app.api.admin.monthly_usage", AsyncMock(return_value=(1.0, 5.0))),
+    ):
         response = TestClient(app).post(
             "/admin/ingest", json={"source": "google_maps"}, headers={"X-Admin-Token": ADMIN}
         )
 
     assert response.status_code == 202
-    assert response.json() == {"status": "started", "source": "google_maps", "run_id": "run-1"}
+    assert response.json() == {
+        "status": "started",
+        "source": "google_maps",
+        "run_id": "run-1",
+        "monthly_usage_usd": "1.00",
+        "monthly_budget_usd": "5.00",
+    }
     args = run.await_args.args
     assert args[2] is SOURCES["google_maps"]
     assert args[3] == "https://api.flyer/admin/ingest/apify-webhook?source=google_maps"
     assert args[4] == HOOK
+
+
+@pytest.mark.parametrize(
+    ("used", "account_limit", "source"),
+    [
+        # Decision 2026-10-19: 5 USD a month on Apify, run while there are credits.
+        (4.5, None, "sympla"),  # 4.5 + 0.6 cap > 5
+        (3.0, None, "google_maps"),  # 3.0 + 2.4 cap > 5
+        (1.0, 2.0, "google_maps"),  # the account's own limit is lower
+    ],
+)
+def test_admin_ingest_does_not_start_a_run_the_months_credits_cannot_pay(
+    configured: MagicMock, used: float, account_limit: float | None, source: str
+) -> None:
+    run = AsyncMock()
+
+    with (
+        patch("app.api.admin.start_run", run),
+        patch("app.api.admin.monthly_usage", AsyncMock(return_value=(used, account_limit))),
+    ):
+        response = TestClient(app).post("/admin/ingest", json={"source": source}, headers={"X-Admin-Token": ADMIN})
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "apify_budget_exhausted"
+    run.assert_not_awaited()
+
+
+def test_admin_ingest_does_not_guess_the_usage(configured: MagicMock) -> None:
+    run = AsyncMock()
+
+    with (
+        patch("app.api.admin.start_run", run),
+        patch("app.api.admin.monthly_usage", AsyncMock(side_effect=httpx.ConnectError("down"))),
+    ):
+        response = TestClient(app).post("/admin/ingest", json={"source": "sympla"}, headers={"X-Admin-Token": ADMIN})
+
+    assert response.status_code == 503
+    run.assert_not_awaited()
+
+
+def test_admin_ingest_logs_why_the_usage_could_not_be_read(
+    configured: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A revoked Apify token must leave a trace, not only "Tente de novo mais tarde".
+    refused = httpx.HTTPStatusError(
+        "401", request=httpx.Request("GET", "https://api.apify.com/v2/users/me/limits"), response=httpx.Response(401)
+    )
+
+    with (
+        patch("app.api.admin.start_run", AsyncMock()),
+        patch("app.api.admin.monthly_usage", AsyncMock(side_effect=refused)),
+        caplog.at_level(logging.WARNING, logger="app.api.admin"),
+    ):
+        response = TestClient(app).post("/admin/ingest", json={"source": "sympla"}, headers={"X-Admin-Token": ADMIN})
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "apify_usage_unavailable"
+    assert any("HTTPStatusError" in r.getMessage() and "401" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.parametrize(
