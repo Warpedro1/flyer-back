@@ -173,13 +173,24 @@ async def image_verdicts(urls: Sequence[str], *, concurrency: int = 8) -> list[V
     return list(await asyncio.gather(*(one(u) for u in urls)))
 
 
-async def path_verdicts(db: Any, paths: Sequence[str]) -> list[Verdict]:
-    """Images uploaded to the private bucket: signed for two minutes, just for the call."""
-    signed = await db.sign_media_paths(list(paths), ttl=_IMAGE_URL_TTL_SECONDS)
+async def path_verdicts(db: Any, paths: Sequence[str], *, missing_unreadable: bool = False) -> list[Verdict]:
+    """Images uploaded to the private bucket: signed for two minutes, just for the call.
+
+    Storage leaves out what it cannot sign (an object that no longer exists). That
+    raises ``ModerationUnavailable``, or, with ``missing_unreadable`` (the moderation
+    pass over stored events, where retrying never helps), is an unreadable image.
+    A failed signing request always raises.
+    """
+    try:
+        signed = await db.sign_media_paths(list(paths), ttl=_IMAGE_URL_TTL_SECONDS)
+    except Exception as exc:
+        raise ModerationUnavailable("the images could not be signed") from exc
     missing = [p for p in paths if p not in signed]
-    if missing:
+    if missing and not missing_unreadable:
         raise ModerationUnavailable(f"{len(missing)} image(s) could not be signed")
-    return await image_verdicts([signed[p] for p in paths])
+    present = [p for p in paths if p in signed]
+    checked = dict(zip(present, await image_verdicts([signed[p] for p in present]), strict=True)) if present else {}
+    return [checked.get(p, Verdict(False, unreadable=True)) for p in paths]
 
 
 # ----------------------------------------------------- created in the app --
@@ -408,7 +419,7 @@ async def _app_row_check(db: Any, row: dict[str, Any]) -> ImportCheck:
     paths = [str(m["media_url"]) for m in media if m.get("type") == "image" and m.get("media_url")]
     paths += [p for p in (trophy.get("icon_url"), row.get("cover_url")) if p]
     if paths:
-        images = await path_verdicts(db, paths)
+        images = await path_verdicts(db, paths, missing_unreadable=True)
         bad = [c for v in images if not v.allowed for c in (v.categories or (UNREADABLE_IMAGE,))]
         if bad:
             return ImportCheck(False, tuple(dict.fromkeys(bad)))

@@ -20,16 +20,20 @@ PHONE = "telefone"
 CPF = "CPF"
 
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-# Separators, the Unicode dashes included (text pasted from Instagram or Word).
-_SEP = r"[\s.\-\u2010-\u2015]"
+# Separators, the Unicode dashes and the minus sign included (text pasted from
+# Instagram or Word).
+_DASHES = r"\-\u2010-\u2015\u2212"
+_SEP = rf"[\s.{_DASHES}]"
+# Before the last four digits the dash may have spaces around it ("98765 - 4321").
+_LAST = rf"(?:\s*[{_DASHES}]\s*|{_SEP})"
 # A Brazilian number with its area code, with or without +55 and with or without a
 # leading 0 ("(081)"): mobiles (9 and 8 digits, often written "9 9999-8888") and
 # landlines (8 digits starting with 2 to 5). Without the area code only a mobile
-# written with its separator counts ("99999-8888"): bare 8-digit runs are too often
-# something else ("2025-2026", "1234-5678").
+# written with its separator counts ("99999-8888", "9 9999-8888"): bare 8-digit runs
+# are too often something else ("2025-2026", "1234-5678").
 _PHONE = re.compile(
-    rf"(?<![\w])(?:(?:\+?55{_SEP}?)?\(?0?\d{{2}}\)?{_SEP}?(?:9{_SEP}?\d{{4}}|[2-5]\d{{3}}){_SEP}?\d{{4}}"
-    rf"|9\d{{4}}{_SEP}\d{{4}})(?![\w])"
+    rf"(?<![\w])(?:(?:\+?55{_SEP}?)?\(?0?\d{{2}}\)?{_SEP}?(?:9{_SEP}?\d{{4}}|[2-5]\d{{3}}){_LAST}?\d{{4}}"
+    rf"|9{_SEP}?\d{{4}}{_LAST}\d{{4}})(?![\w])"
 )
 _CPF = re.compile(r"(?<!\d)\d{3}\.?\d{3}\.?\d{3}-?\d{2}(?!\d)")
 

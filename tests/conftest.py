@@ -74,7 +74,7 @@ def _moderation_allows_everything(monkeypatch: pytest.MonkeyPatch) -> None:
     async def allow(inputs: Any) -> list[tuple[bool, list[str]]]:
         return [(True, [])] * len(inputs)
 
-    async def paths(_db: Any, items: Any) -> list[Any]:
+    async def paths(_db: Any, items: Any, **_: Any) -> list[Any]:
         return [moderation.Verdict(True)] * len(items)
 
     async def no_completion(*_: Any, **__: Any) -> str:

@@ -92,6 +92,11 @@ def _says(flagged: dict[str, list[str]], *, images: Any = None) -> Any:
         ("(81) 99999\u20138888", ["telefone"]),
         ("81 9 9999 8888", ["telefone"]),
         ("wa.me/5581999998888", ["telefone"]),
+        ("Informações e reservas: 9 9876-5432 (Maria)", ["telefone"]),
+        ("Reservas pelo zap 9.8765-4321", ["telefone"]),
+        ("Reservas: (81) 98765 - 4321", ["telefone"]),
+        ("(81) 99999 \u2013 8888", ["telefone"]),
+        ("81 99999\u22128888", ["telefone"]),
         ("2025-2026, 2025\u20132026, das 19:00 às 23:00, 18/10/2026, 2026-10-18", []),
         ("Senha 1234-5678, sala 9000-1000", []),
         ("Ingresso R$ 1.234,56, dia 12/10/2026 às 19:30", []),
@@ -717,7 +722,7 @@ async def test_the_pass_checks_everything_an_app_event_shows(monkeypatch: pytest
     monkeypatch.setattr(ai_service, "moderate_inputs", _says({"Ódio FC": ["hate"], "Beco da briga": ["violence"]}))
     seen: list[list[str]] = []
 
-    async def paths(_db: Any, items: list[str]) -> list[Verdict]:
+    async def paths(_db: Any, items: list[str], **_: Any) -> list[Verdict]:
         seen.append(list(items))
         return [Verdict(False, ("sexual",)) if p == "user-1/foto.jpg" else Verdict(True) for p in items]
 
@@ -757,7 +762,7 @@ async def test_an_app_event_whose_photos_cannot_be_checked_stays_unchecked(monke
 async def test_app_rows_checked_in_time_are_kept_when_the_budget_runs_out(monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncio
 
-    async def paths(_db: Any, items: list[str]) -> list[Verdict]:
+    async def paths(_db: Any, items: list[str], **_: Any) -> list[Verdict]:
         if any("lenta" in p for p in items):
             await asyncio.sleep(5)
         return [Verdict(True)] * len(items)
@@ -773,6 +778,38 @@ async def test_app_rows_checked_in_time_are_kept_when_the_budget_runs_out(monkey
     written = {c.args[0] for c in db.set_event_moderation.await_args_list}
     assert written == {"r0", "r1", "r2", "r3"}
     assert result.checked == 4 and result.not_checked == 2
+
+
+async def test_an_app_photo_that_no_longer_exists_hides_the_event_instead_of_stalling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Storage signs what exists and leaves the rest out: such a row would otherwise
+    # stay stale forever and stop the owner's script before the keywords.
+    monkeypatch.setattr(moderation, "path_verdicts", real_path_verdicts)
+    monkeypatch.setattr(moderation, "image_verdicts", AsyncMock(return_value=[Verdict(True)]))
+    db = _app_rows_db(
+        [_app_row("photo", "Feira")],
+        media={"photo": [{"media_url": "user-1/existe.jpg", "type": "image"}, {"media_url": "string", "type": "image"}]},
+        trophies={},
+    )
+    db.sign_media_paths = AsyncMock(return_value={"user-1/existe.jpg": "https://signed/existe"})
+
+    await moderate_stale(db, limit=50, budget_seconds=5)
+
+    fields = db.set_event_moderation.await_args.args[1]
+    assert fields["moderation_blocked"] is True
+    assert fields["moderation_reasons"] == ["unreadable_image"]
+
+
+async def test_when_storage_cannot_sign_at_all_the_app_event_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(moderation, "path_verdicts", real_path_verdicts)
+    db = _app_rows_db([_app_row("photo", "Feira")], media={"photo": [{"media_url": "user-1/a.jpg", "type": "image"}]}, trophies={})
+    db.sign_media_paths = AsyncMock(side_effect=httpx.ConnectError("down"))
+
+    result = await moderate_stale(db, limit=50, budget_seconds=5)
+
+    db.set_event_moderation.assert_not_awaited()
+    assert result.not_checked == 1
 
 
 async def test_an_unreadable_photo_hides_an_app_event(monkeypatch: pytest.MonkeyPatch) -> None:
