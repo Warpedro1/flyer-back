@@ -77,7 +77,8 @@ def _embedding_text(ev: StandardizedEvent, row: dict[str, Any] | None) -> str:
 def _row(ev: StandardizedEvent, embedding: list[float] | None) -> dict[str, Any]:
     # Every row of a request has the same keys: PostgREST takes a bulk insert's
     # columns from the rows. `place_id` is left out on purpose so a re-import never
-    # undoes a link, and `event_embedding` when there is no new vector (see below).
+    # undoes a link, `event_embedding` when there is no new vector (see below) and
+    # `reviews_count` when the source did not give one.
     row: dict[str, Any] = {
         "source": ev.source,
         "source_event_id": ev.source_event_id,
@@ -99,6 +100,9 @@ def _row(ev: StandardizedEvent, embedding: list[float] | None) -> dict[str, Any]
         "source_url": ev.source_url,
         "cover_url": ev.cover_url,
     }
+    # An unknown count never overwrites the one stored (a run without it, or Sympla).
+    if ev.reviews_count is not None:
+        row["reviews_count"] = ev.reviews_count
     if embedding is not None:
         row["event_embedding"] = embedding
     return row

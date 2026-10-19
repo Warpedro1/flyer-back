@@ -13,6 +13,7 @@ these tests set `ai_service.moderate_inputs` to say otherwise.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -746,9 +747,7 @@ async def test_the_import_reads_what_the_moderation_remembers() -> None:
 async def test_the_import_removes_contacts_before_anything_is_stored() -> None:
     raw = [{"id": "e1"}]
     ev = _imported(1, description="Ingressos: (81) 99999-8888")
-    source = MagicMock(name="sympla")
-    source.name = "sympla"
-    source.transform = MagicMock(return_value=ev)
+    source = dataclasses.replace(SOURCES["sympla"], transform=MagicMock(return_value=ev))
     upsert = AsyncMock(return_value=MagicMock(upserted=1, blocked=0, pending=0, covers_removed=0))
 
     with (

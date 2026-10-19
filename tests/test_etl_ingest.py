@@ -93,11 +93,35 @@ async def test_the_months_usage_comes_from_the_account_limits() -> None:
     assert http.get.await_args.kwargs["headers"]["Authorization"] == "Bearer apify-token"
 
 
-def test_the_pilot_stays_within_its_budget() -> None:
-    # Decision 2026-10-11: pilot of ~3 USD. Apify stops charging at the cap.
+def test_the_catalogue_stays_within_its_budget() -> None:
+    # Decision 2026-10-11: ~3 USD a round. Apify stops charging at the cap, so all
+    # the run asks for must fit under it, start fee included; a paid filter would
+    # add 0.001 USD a place (the pilot's skipClosedPlaces cut it at 480 of 600).
     assert sum(s.max_charge_usd for s in SOURCES.values()) <= 3.0
     places = SOURCES["google_maps"].run_input()
-    assert len(places["searchStringsArray"]) * places["maxCrawledPlacesPerSearch"] <= 600
+    assert not places["skipClosedPlaces"]
+    assert not places["scrapePlaceDetailPage"]
+    wanted = len(places["searchStringsArray"]) * places["maxCrawledPlacesPerSearch"]
+    assert 0.007 + wanted * 0.004 <= SOURCES["google_maps"].max_charge_usd
+    assert 0.02 + SOURCES["sympla"].run_input()["maxItems"] * 0.008 <= SOURCES["sympla"].max_charge_usd
+
+
+def test_a_month_fits_google_maps_and_four_sympla_runs() -> None:
+    assert SOURCES["google_maps"].max_charge_usd + 4 * SOURCES["sympla"].max_charge_usd <= settings.APIFY_MONTHLY_BUDGET_USD
+
+
+def test_the_searches_favour_what_pleases_most_people() -> None:
+    # Decision 2026-10-19: city icons and broad leisure city-wide, food and drink in
+    # each area, the niches city-wide only.
+    searches = SOURCES["google_maps"].run_input()["searchStringsArray"]
+
+    assert len(searches) == 26
+    assert len(set(searches)) == 26
+    assert "parques em Recife" in searches
+    assert "pontos turísticos em Recife" in searches
+    assert sum(s.startswith("restaurantes ") for s in searches) == 4
+    assert sum(s.startswith("bares ") for s in searches) == 4
+    assert [s for s in searches if s.startswith("yoga e spa ")] == ["yoga e spa em Recife"]
 
 
 # --------------------------------------------------------------- pipeline --
@@ -120,6 +144,157 @@ async def test_ingest_dataset_transforms_loads_and_links() -> None:
     assert report.errors == []
     assert [e.source_event_id for e in upsert.await_args.args[1]] == ["p1"]
     link.assert_awaited_once()
+
+
+def _place_item(place_id: str, reviews: int | None, search: str = "parques em Recife", score: float = 4.6) -> dict[str, object]:
+    return {
+        "title": f"Lugar {place_id}",
+        "placeId": place_id,
+        "location": {"lat": -8.1, "lng": -34.9},
+        "searchString": search,
+        "reviewsCount": reviews,
+        "totalScore": score,
+    }
+
+
+async def test_ingest_dataset_keeps_the_popular_places_most_reviewed_first() -> None:
+    raw = [
+        _place_item("few", 120),
+        _place_item("unknown", None),
+        _place_item("many", 9000),
+        _place_item("some", 800),
+        # Found again by a niche search, where it passes: it is not unpopular.
+        _place_item("few", 120, search="cursos e oficinas em Recife"),
+        _place_item("niche", 60, search="yoga e spa em Recife"),
+    ]
+
+    with (
+        patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=raw)),
+        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=LoadResult(upserted=5))) as upsert,
+        patch("app.services.etl.pipeline.link_events_to_places", AsyncMock(return_value=0)),
+        patch("app.services.etl.pipeline.reprocess_stale", AsyncMock(return_value=ReprocessResult(0, 0, 0))),
+    ):
+        report = await ingest_dataset(MagicMock(), MagicMock(), SOURCES["google_maps"], "ds-1", "tok")
+
+    loaded = upsert.await_args.args[1]
+    assert [e.source_event_id for e in loaded] == ["many", "some", "few", "niche"]
+    assert next(e for e in loaded if e.source_event_id == "few").category == "cursos_oficinas"
+    # The run carries counts, so the place without one has none.
+    assert report.not_popular == 1
+    assert report.warnings == []
+
+
+async def test_without_review_counts_the_import_warns_and_goes_on() -> None:
+    raw = [_place_item("a", None), _place_item("b", None, score=3.5)]
+
+    with (
+        patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=raw)),
+        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=LoadResult(upserted=1))) as upsert,
+        patch("app.services.etl.pipeline.link_events_to_places", AsyncMock(return_value=0)),
+        patch("app.services.etl.pipeline.reprocess_stale", AsyncMock(return_value=ReprocessResult(0, 0, 0))),
+        patch("app.services.etl.pipeline.error_log.record_error", AsyncMock()) as record,
+    ):
+        report = await ingest_dataset(MagicMock(), MagicMock(), SOURCES["google_maps"], "ds-1", "tok")
+
+    # Only the rating could be applied; the owner learns why from app_errors.
+    assert [e.source_event_id for e in upsert.await_args.args[1]] == ["a"]
+    assert report.errors == []
+    assert report.warnings and "reviewsCount" in report.warnings[0]
+    record.assert_awaited_once()
+    assert record.await_args.kwargs["code"] == "etl_popularity_signal_missing"
+
+
+@pytest.mark.parametrize("generic_first", [True, False])
+@pytest.mark.parametrize(
+    ("specific", "google", "expected"),
+    [
+        ("museus em Recife", "Museu", "arte_cultura"),
+        # Google's own category maps to nothing ours: the specific search still wins.
+        ("mercados públicos e feiras em Recife", "Mercado", "feira_mercado"),
+        ("parques em Recife", "Atração turística", "praia_natureza"),
+    ],
+)
+async def test_a_place_found_by_two_searches_gets_the_same_category_in_any_order(
+    generic_first: bool, specific: str, google: str, expected: str
+) -> None:
+    found = {**_place_item("paco", 5000, search=specific), "categoryName": google}
+    landmark = {**_place_item("paco", 5000, search="pontos turísticos em Recife"), "categoryName": google}
+    raw = [landmark, found] if generic_first else [found, landmark]
+
+    with (
+        patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=raw)),
+        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=LoadResult(upserted=1))) as upsert,
+        patch("app.services.etl.pipeline.link_events_to_places", AsyncMock(return_value=0)),
+        patch("app.services.etl.pipeline.reprocess_stale", AsyncMock(return_value=ReprocessResult(0, 0, 0))),
+    ):
+        await ingest_dataset(MagicMock(), MagicMock(), SOURCES["google_maps"], "ds-1", "tok")
+
+    assert [e.category for e in upsert.await_args.args[1]] == [expected]
+
+
+@pytest.mark.parametrize("bars_first", [True, False])
+async def test_between_two_specific_searches_the_first_in_the_plan_wins(bars_first: bool) -> None:
+    restaurant = _place_item("x", 900, search="restaurantes em Boa Viagem, Recife")
+    bar = _place_item("x", 900, search="bares em Boa Viagem, Recife")
+    raw = [bar, restaurant] if bars_first else [restaurant, bar]
+
+    with (
+        patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=raw)),
+        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=LoadResult(upserted=1))) as upsert,
+        patch("app.services.etl.pipeline.link_events_to_places", AsyncMock(return_value=0)),
+        patch("app.services.etl.pipeline.reprocess_stale", AsyncMock(return_value=ReprocessResult(0, 0, 0))),
+    ):
+        await ingest_dataset(MagicMock(), MagicMock(), SOURCES["google_maps"], "ds-1", "tok")
+
+    assert [e.category for e in upsert.await_args.args[1]] == ["comida_bebida"]
+
+
+async def test_ingest_dataset_counts_the_places_left_out() -> None:
+    raw = [_place_item("quiet", 40), _place_item("quiet", 40, search="pontos turísticos em Recife"), _place_item("big", 3000)]
+
+    with (
+        patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=raw)),
+        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=LoadResult(upserted=1))) as upsert,
+        patch("app.services.etl.pipeline.link_events_to_places", AsyncMock(return_value=0)),
+        patch("app.services.etl.pipeline.reprocess_stale", AsyncMock(return_value=ReprocessResult(0, 0, 0))),
+    ):
+        report = await ingest_dataset(MagicMock(), MagicMock(), SOURCES["google_maps"], "ds-1", "tok")
+
+    assert [e.source_event_id for e in upsert.await_args.args[1]] == ["big"]
+    assert (report.fetched, report.standardized, report.not_popular) == (3, 1, 1)
+
+
+async def test_sympla_events_of_broad_appeal_go_first_each_by_date() -> None:
+    def item(event_id: str, fmt: str, day: int) -> dict[str, object]:
+        return {
+            "id": event_id,
+            "name": f"Evento {event_id}",
+            "type": "NORMAL",
+            "format": fmt,
+            "startDate": f"2099-11-{day:02d}T20:00:00-03:00",
+            "location": {"latitude": -8.1, "longitude": -34.9},
+        }
+
+    raw = [
+        item("congress", "congressos-e-palestras", 1),
+        item("show", "festas-e-shows", 9),
+        item("play", "teatro-stand-up-e-danca", 3),
+        item("course", "cursos-e-workshops", 2),
+        # Tours are not among what the owner put first (shows, parties, festivals, theatre).
+        item("tour", "passeios-e-tours", 4),
+    ]
+
+    with (
+        patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=raw)),
+        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=LoadResult(upserted=5))) as upsert,
+        patch("app.services.etl.pipeline.link_events_to_places", AsyncMock(return_value=0)),
+        patch("app.services.etl.pipeline.reprocess_stale", AsyncMock(return_value=ReprocessResult(0, 0, 0))),
+    ):
+        report = await ingest_dataset(MagicMock(), MagicMock(), SOURCES["sympla"], "ds-1", "tok")
+
+    # Exclude nothing (decision 2026-10-19): only the order changes.
+    assert [e.source_event_id for e in upsert.await_args.args[1]] == ["play", "show", "congress", "course", "tour"]
+    assert report.not_popular == 0
 
 
 async def test_ingest_dataset_reports_instead_of_raising() -> None:

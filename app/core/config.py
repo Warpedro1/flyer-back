@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     # Decision 2026-10-19: 5 USD a month on Apify; a run starts only when its charge
     # cap still fits what is left of the month (or of the account's own limit).
     APIFY_MONTHLY_BUDGET_USD: float = Field(default=5.0, ge=0.0)
+    # Which Google Maps places come in (decision 2026-10-19: what pleases most people,
+    # by reviews and rating). Niche searches get a lower bar, so they still bring some.
+    PLACES_MIN_REVIEWS: int = Field(default=300, ge=0)
+    PLACES_MIN_REVIEWS_NICHE: int = Field(default=50, ge=0)
+    PLACES_MIN_RATING: float = Field(default=4.2, ge=0.0, le=5.0)
     # Public base URL of this API, for the webhook Apify calls. Empty: the request's.
     PUBLIC_API_BASE_URL: str = ""
 

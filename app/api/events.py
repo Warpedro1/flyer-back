@@ -149,7 +149,7 @@ async def discover_events(
     """Events near the user, best match first.
 
     Users without an interest vector (no onboarding yet) get the same nearby events
-    ordered by date instead of an error. ``X-Discovery-Mode`` tells the app which
+    and places, what pleases most people first, instead of an error. ``X-Discovery-Mode`` tells the app which
     one it got (``personalized`` or ``nearby``) so it can suggest the onboarding.
     """
     user_id, jwt = auth

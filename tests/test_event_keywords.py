@@ -426,6 +426,9 @@ async def test_the_stale_rows_are_read_without_their_vectors() -> None:
     assert params["keywords_stale"] == "is.true"
     assert "embedding" not in params["select"]
     assert params["limit"] == "80"
+    # Events first (few, and they pass), then the most reviewed places (decision
+    # 2026-10-19); the id keeps the pages stable.
+    assert params["order"] == "kind.asc,reviews_count.desc.nullslast,id.asc"
 
 
 async def test_the_stored_keywords_of_a_source_are_read_page_by_page() -> None:
