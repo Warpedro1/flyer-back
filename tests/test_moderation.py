@@ -516,6 +516,31 @@ async def test_finished_text_checks_are_kept_when_time_runs_out(monkeypatch: pyt
     assert out[32:] == [None] * 8
 
 
+async def test_a_moderation_that_times_out_on_its_own_is_recorded(
+    monkeypatch: pytest.MonkeyPatch, recorded: list[dict[str, Any]]
+) -> None:
+    # ai_service gives up after MODERATION_TIMEOUT_SECONDS with a TimeoutError, well
+    # before the import's own deadline: that is the moderation failing, not time running out.
+    monkeypatch.setattr(ai_service, "moderate_inputs", AsyncMock(side_effect=TimeoutError()))
+
+    out = await check_imports([(f"texto {i}", None) for i in range(40)], budget_seconds=10)
+
+    assert out == [None] * 40
+    assert [r["code"] for r in recorded] == ["moderation_api_error"]
+
+
+async def test_an_unreadable_cover_is_dropped_but_tried_again_next_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    # OpenAI could not fetch it (a slow host, say): unlike a refused cover, it is not remembered.
+    monkeypatch.setattr(ai_service, "moderate_inputs", _says({}, images=_status_error(400)))
+    db = _etl_db()
+
+    await _load(db, [_imported(1)])
+
+    row = _rows(db)["s1"]
+    assert row["cover_url"] is None
+    assert row["moderation_dropped_cover"] is None
+
+
 async def test_text_checks_run_side_by_side(monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncio
 
@@ -727,6 +752,27 @@ async def test_an_app_event_whose_photos_cannot_be_checked_stays_unchecked(monke
 
     db.set_event_moderation.assert_not_awaited()
     assert result.not_checked == 1 and result.checked == 0
+
+
+async def test_app_rows_checked_in_time_are_kept_when_the_budget_runs_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    async def paths(_db: Any, items: list[str]) -> list[Verdict]:
+        if any("lenta" in p for p in items):
+            await asyncio.sleep(5)
+        return [Verdict(True)] * len(items)
+
+    monkeypatch.setattr(moderation, "path_verdicts", paths)
+    monkeypatch.setattr(moderation, "_MIN_CALL_SECONDS", 0.01)
+    rows = [_app_row(f"r{i}", f"Evento {i}") for i in range(6)]
+    media = {f"r{i}": [{"media_url": f"user-1/{'lenta' if i >= 4 else 'foto'}{i}.jpg", "type": "image"}] for i in range(6)}
+    db = _app_rows_db(rows, media=media, trophies={})
+
+    result = await moderate_stale(db, limit=50, budget_seconds=0.3)
+
+    written = {c.args[0] for c in db.set_event_moderation.await_args_list}
+    assert written == {"r0", "r1", "r2", "r3"}
+    assert result.checked == 4 and result.not_checked == 2
 
 
 async def test_an_unreadable_photo_hides_an_app_event(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -10,7 +10,8 @@ cannot be read, and a batch whose embeddings failed keeps the vectors it had.
 Moderation (#22 A): what is new or changed since it was last checked goes through
 the moderation first (``IMPORT_MODERATION_BUDGET_SECONDS``). Refused text never
 enters (a row that was already here is hidden); a refused or unreadable cover is
-dropped (and remembered, so the same cover is not checked again); what could not be
+dropped (a refused one is remembered, so it is not checked again; an unreadable one
+is tried again next time); what could not be
 checked in time waits for the next import (an existing row keeps its checked
 content). Unchanged rows are never checked again; hidden ones always are.
 """
@@ -183,7 +184,8 @@ async def upsert_events(
             continue
         dropped = None
         if check.drop_cover and ev.cover_url:
-            dropped = ev.cover_url
+            # Only a refused cover is remembered; one that could not be read is tried again.
+            dropped = None if check.cover_unreadable else ev.cover_url
             ev = ev.model_copy(update={"cover_url": None})
             result.covers_removed += 1
         kept.append(

@@ -107,7 +107,9 @@ class ModerationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     dry_run: bool = False
-    # One image call per cover: 100 of them, 8 at a time, fit a 60 s function.
+    # Imported rows: one image call per cover, 8 at a time. App rows (photos and
+    # icon, 4 rows at a time) may not all fit: what does not finish inside the budget
+    # is left stale for the next call, the rest is written.
     limit: int = Field(default=100, ge=1, le=100)
 
 

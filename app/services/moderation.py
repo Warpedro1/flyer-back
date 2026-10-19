@@ -275,6 +275,9 @@ class ImportCheck:
     categories: tuple[str, ...] = ()
     # The cover was refused or could not be read: the item goes in without it.
     drop_cover: bool = False
+    # Could not be read (rather than refused): not remembered, so the next import
+    # tries it again (the host may only have been slow for the moderation's fetch).
+    cover_unreadable: bool = False
 
 
 def import_text(title: str | None, description: str | None) -> str:
@@ -318,7 +321,9 @@ async def check_imports(
                 verdict = await asyncio.wait_for(image_verdict(url), timeout=left)
             except (ModerationUnavailable, TimeoutError):
                 return
-            out[i] = ImportCheck(True, verdict.categories, drop_cover=not verdict.allowed)
+            out[i] = ImportCheck(
+                True, verdict.categories, drop_cover=not verdict.allowed, cover_unreadable=verdict.unreadable
+            )
 
     await asyncio.gather(*(one(i, url) for i, url in pending))
     return out
@@ -341,7 +346,10 @@ async def _import_text_verdicts(texts: Sequence[str], deadline: float) -> list[V
             try:
                 verdicts = await asyncio.wait_for(_chunk_verdicts(chunk), timeout=left)
             except Exception as exc:
-                failures.append(exc)
+                # Our own deadline is time running out; anything else, the moderation's
+                # own time limit included (MODERATION_TIMEOUT_SECONDS), is it failing.
+                if not (isinstance(exc, TimeoutError) and loop.time() >= deadline - 0.05):
+                    failures.append(exc)
                 return
         for (i, _), verdict in zip(chunk, verdicts, strict=True):
             out[i] = verdict
@@ -350,10 +358,9 @@ async def _import_text_verdicts(texts: Sequence[str], deadline: float) -> list[V
     unchecked = sum(v is None for v in out)
     if unchecked:
         logger.warning("Import moderation left %d texts for the next run.", unchecked)
-    errors = [e for e in failures if not isinstance(e, TimeoutError)]
-    if errors:
+    if failures:
         # Once per import, not once per request.
-        await _record("moderation_api_error", errors[0], stage="import_text", failed_requests=len(errors))
+        await _record("moderation_api_error", failures[0], stage="import_text", failed_requests=len(failures))
     return out
 
 
@@ -409,20 +416,24 @@ async def _app_row_check(db: Any, row: dict[str, Any]) -> ImportCheck:
 
 
 async def _app_row_checks(db: Any, rows: list[dict[str, Any]], *, budget_seconds: float) -> list[ImportCheck | None]:
+    """A few rows at a time, each bounded by the same deadline: a row that does not
+    finish in time is left stale (None), the ones that did keep their checks."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget_seconds
     gate = asyncio.Semaphore(4)
 
     async def one(row: dict[str, Any]) -> ImportCheck | None:
         async with gate:
+            left = deadline - loop.time()
+            if left < _MIN_CALL_SECONDS:
+                return None
             try:
-                return await _app_row_check(db, row)
+                return await asyncio.wait_for(_app_row_check(db, row), timeout=left)
             except Exception as exc:  # noqa: BLE001 — anything unchecked stays stale
                 logger.warning("Moderation pass could not check an app event (%s)", type(exc).__name__)
                 return None
 
-    try:
-        return list(await asyncio.wait_for(asyncio.gather(*(one(r) for r in rows)), timeout=budget_seconds))
-    except TimeoutError:
-        return [None] * len(rows)
+    return list(await asyncio.gather(*(one(r) for r in rows)))
 
 
 async def moderate_stale(db: Any, *, limit: int, budget_seconds: float) -> PassResult:
@@ -468,7 +479,8 @@ async def moderate_stale(db: Any, *, limit: int, budget_seconds: float) -> PassR
             result.contacts_removed += 1
         dropped = None
         if check.allowed and check.drop_cover and cover and row.get("source"):
-            dropped, cover = cover, None
+            dropped = None if check.cover_unreadable else cover
+            cover = None
             fields["cover_url"] = None
             result.covers_removed += 1
         fields.update(
