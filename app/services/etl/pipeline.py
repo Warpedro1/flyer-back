@@ -66,7 +66,8 @@ async def ingest_dataset(
         events.append(ev)
     report.standardized = len(events)
     report.not_popular = len(left_out - seen)
-    # Most popular first: the moderation and keyword budgets reach those first.
+    # Most popular first: the moderation budget reaches those first. (The keyword
+    # step below reads the stale rows: events first, then the most reviewed places.)
     events.sort(key=source.rank)
     if report.warnings:
         # Nobody reads the webhook's answer: app_errors is where the owner sees it.

@@ -5,7 +5,8 @@ that Apify enforces on the run itself (decision 2026-10-11: ~3 USD a round). Wha
 pleases most people comes first (decision 2026-10-19): the searches favour the
 city's icons, broad leisure and popular food and drink (`taxonomy.PLACE_SEARCHES`),
 only popular places come in (`keep`), and each run is loaded most popular first
-(`rank`), so the moderation and keyword budgets of the import reach those first.
+(`rank`), so the import's moderation budget reaches those first; its keyword step
+reads the stale rows events first, then the most reviewed places.
 """
 
 from __future__ import annotations
