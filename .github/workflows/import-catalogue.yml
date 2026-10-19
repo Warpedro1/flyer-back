@@ -1,0 +1,67 @@
+name: Importar catálogo
+
+# Importação recorrente pelo Apify (decisão de 2026-10-19: US$ 5 por mês, rodando
+# enquanto houver créditos). Só começa a corrida: o Apify chama o webhook do backend
+# quando ela termina, e é ele que carrega, modera e grava os dados.
+#
+# O backend (POST /admin/ingest) não começa uma corrida cujo teto de custo não caiba
+# no que sobra do mês (APIFY_MONTHLY_BUDGET_USD e o limite da própria conta). Sem
+# créditos, o job só avisa e termina sem erro.
+#
+# Precisa do segredo ADMIN_INGEST_TOKEN (Settings → Secrets and variables → Actions).
+on:
+  schedule:
+    # Sympla toda segunda (teto de US$ 0,60 por corrida).
+    - cron: '17 9 * * 1'
+    # Google Maps no dia 2 de cada mês (teto de US$ 2,40).
+    - cron: '23 9 2 * *'
+  workflow_dispatch:
+    inputs:
+      fonte:
+        description: 'Qual fonte importar agora'
+        type: choice
+        options: [sympla, google_maps]
+        default: sympla
+
+permissions:
+  contents: read
+
+concurrency:
+  group: importar-catalogo
+  cancel-in-progress: false
+
+jobs:
+  importar:
+    name: Começar a importação
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Escolher a fonte
+        id: fonte
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "nome=${{ inputs.fonte }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "23 9 2 * *" ]; then
+            echo "nome=google_maps" >> "$GITHUB_OUTPUT"
+          else
+            echo "nome=sympla" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Começar a corrida no Apify
+        env:
+          ADMIN_INGEST_TOKEN: ${{ secrets.ADMIN_INGEST_TOKEN }}
+          FONTE: ${{ steps.fonte.outputs.nome }}
+        run: |
+          if [ -z "$ADMIN_INGEST_TOKEN" ]; then
+            echo "::error::Crie o segredo ADMIN_INGEST_TOKEN em Settings → Secrets and variables → Actions, com o mesmo valor da Vercel."
+            exit 1
+          fi
+          status=$(curl -sS -o resposta.json -w '%{http_code}' -X POST https://flyer-back.vercel.app/admin/ingest \
+            -H @<(printf 'X-Admin-Token: %s\n' "$ADMIN_INGEST_TOKEN") \
+            -H 'content-type: application/json' -d "{\"source\": \"$FONTE\"}")
+          cat resposta.json; echo
+          case "$status" in
+            202) echo "::notice::Importação de $FONTE começou; o backend carrega os dados quando o Apify terminar." ;;
+            409) echo "::notice::Sem créditos do Apify neste mês para $FONTE; a próxima tentativa é no próximo agendamento." ;;
+            *) echo "::error::A importação de $FONTE não começou (HTTP $status)."; exit 1 ;;
+          esac

@@ -23,8 +23,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.deps import DbServiceDep, HttpClientDep
 from app.core.config import settings
+from app.core.errors import ApiError
 from app.core.limiter import limiter
-from app.services.etl.apify import start_run
+from app.services.etl.apify import monthly_usage, start_run
 from app.services.etl.pipeline import ingest_dataset
 from app.services.etl.schemas import IngestionReport
 from app.services.etl.sources import SOURCES
@@ -167,10 +168,35 @@ async def trigger_ingest(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Ingestion is disabled (APIFY_WEBHOOK_SECRET not set).",
         )
+    source = SOURCES[body.source]
+    # Run while there are credits (decision 2026-10-19): never start a run whose
+    # charge cap does not fit what is left of the month.
+    try:
+        used, account_limit = await monthly_usage(http, token)
+    except Exception:
+        raise ApiError(
+            503, "apify_usage_unavailable", "Não conseguimos consultar o gasto do mês no Apify. Tente de novo mais tarde."
+        ) from None
+    budget = settings.APIFY_MONTHLY_BUDGET_USD
+    if account_limit is not None:
+        budget = min(budget, account_limit)
+    if used + source.max_charge_usd > budget:
+        raise ApiError(
+            409,
+            "apify_budget_exhausted",
+            f"Sem créditos do Apify para esta importação neste mês: gasto US$ {used:.2f} de US$ {budget:.2f},"
+            f" e ela pode custar até US$ {source.max_charge_usd:.2f}.",
+        )
     base = (settings.PUBLIC_API_BASE_URL or str(request.base_url)).rstrip("/")
     webhook_url = f"{base}/admin/ingest/apify-webhook?source={body.source}"
-    run = await start_run(http, token, SOURCES[body.source], webhook_url, settings.APIFY_WEBHOOK_SECRET)
-    return {"status": "started", "source": body.source, "run_id": str(run.get("id", ""))}
+    run = await start_run(http, token, source, webhook_url, settings.APIFY_WEBHOOK_SECRET)
+    return {
+        "status": "started",
+        "source": body.source,
+        "run_id": str(run.get("id", "")),
+        "monthly_usage_usd": f"{used:.2f}",
+        "monthly_budget_usd": f"{budget:.2f}",
+    }
 
 
 @router.post("/ingest/apify-webhook", response_model=IngestionReport)

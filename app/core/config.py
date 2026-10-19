@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     # Secret Apify sends back in X-Apify-Webhook-Secret when a run ends. Separate from
     # the admin token: Apify stores it, so it only opens the webhook.
     APIFY_WEBHOOK_SECRET: str = ""
+    # Decision 2026-10-19: 5 USD a month on Apify; a run starts only when its charge
+    # cap still fits what is left of the month (or of the account's own limit).
+    APIFY_MONTHLY_BUDGET_USD: float = Field(default=5.0, ge=0.0)
     # Public base URL of this API, for the webhook Apify calls. Empty: the request's.
     PUBLIC_API_BASE_URL: str = ""
 
