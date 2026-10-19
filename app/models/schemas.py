@@ -176,6 +176,9 @@ class EventRead(BaseModel):
     # Ingested items: the page at the source and its public cover image.
     source_url: str | None = None
     cover_url: str | None = None
+    # Hidden by the moderation (#22 A). Only its creator ever gets such an event,
+    # so they can see why and fix it by editing.
+    moderation_blocked: bool = False
 
 
 class DiscoverRequest(BaseModel):
@@ -511,6 +514,24 @@ class EventCreate(_EventFields):
 
 class EventUpdate(_EventFields):
     """Payload for editing one event (one date of a series): no recurrence."""
+
+
+class EventDescribeRequest(BaseModel):
+    """What "Melhorar descrição" works from (#22 C): only what the creator wrote."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    category: EventCategory | None = None
+
+
+class EventDescribeRead(BaseModel):
+    """A suggestion the creator may use or ignore; nothing is saved."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: str
 
 
 class EventMediaEdit(BaseModel):

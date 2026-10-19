@@ -99,6 +99,30 @@ class AIService:
         content = completion.choices[0].message.content
         return content or ""
 
+    async def complete(
+        self,
+        system_prompt: str,
+        user_content: str,
+        *,
+        model: str,
+        max_tokens: int,
+        timeout: float,
+    ) -> str:
+        """One plain-text answer (e.g. "Melhorar descrição", #22 C), limited in time."""
+        completion = await _limited(
+            self._client.chat.completions.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                timeout=timeout,
+            ),
+            timeout,
+        )
+        return completion.choices[0].message.content or ""
+
     async def json_completion(
         self,
         system_prompt: str,
@@ -171,6 +195,20 @@ class AIService:
         """Generic convex blend (used for anchor vs organic sync)."""
         return AIService._weighted_sum(current, new, weight_current, weight_new)
 
+    async def moderate_inputs(self, inputs: list[Any]) -> list[tuple[bool, list[str]]]:
+        """One moderation request; one ``(allowed, categories)`` per input, in order.
+
+        ``inputs`` are strings (each its own result) or a single multimodal list
+        (``{"type": "image_url", ...}``). Raises on any failure: the caller decides
+        what "unavailable" means (#22 A).
+        """
+        timeout = settings.MODERATION_TIMEOUT_SECONDS
+        resp = await _limited(
+            self._client.moderations.create(model=settings.MODERATION_MODEL, input=inputs, timeout=timeout),
+            timeout,
+        )
+        return [(not r.flagged, _flagged_categories(r) if r.flagged else []) for r in resp.results]
+
     async def moderate_text(self, text: str) -> tuple[bool, list[str]]:
         """Return (is_allowed, flagged_categories_or_reasons).
 
@@ -202,14 +240,14 @@ class AIService:
             return False, ["moderation_api_error"]
         result = resp.results[0]
         if result.flagged:
-            cats: list[str] = []
-            cats_obj = result.categories
-            raw = cats_obj.model_dump() if hasattr(cats_obj, "model_dump") else dict(cats_obj)
-            for name, flagged in raw.items():
-                if flagged:
-                    cats.append(str(name))
-            return False, cats or ["moderation_flagged"]
+            return False, _flagged_categories(result)
         return True, []
+
+
+def _flagged_categories(result: Any) -> list[str]:
+    cats_obj = result.categories
+    raw = cats_obj.model_dump() if hasattr(cats_obj, "model_dump") else dict(cats_obj)
+    return [str(name) for name, flagged in raw.items() if flagged] or ["moderation_flagged"]
 
 
 ai_service = AIService()

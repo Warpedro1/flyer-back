@@ -6,19 +6,37 @@ text, as before, and stays stale (`events.keywords_stale`) until the reprocessin
 gives it keywords. A row whose keywords are fresh must never get any other vector:
 the reprocessing would not see it. So the load stops when the stored keywords
 cannot be read, and a batch whose embeddings failed keeps the vectors it had.
+
+Moderation (#22 A): what is new or changed since it was last checked goes through
+the moderation first (``IMPORT_MODERATION_BUDGET_SECONDS``). Refused text never
+enters (a row that was already here is hidden); a refused or unreadable cover is
+dropped and remembered, so it is not checked again (an unreadable one only after
+``UNREADABLE_COVER_RETRY_DAYS``); what could not be checked in time waits for the
+next import (an existing row keeps its checked content). Unchanged rows are never
+checked again; hidden ones always are.
 """
 
 from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.core.config import settings
 from app.services.ai_service import ai_service
 from app.services.db_service import DBService
 from app.services.etl.schemas import StandardizedEvent
 from app.services.etl.transform import normalize
 from app.services.event_keywords import raw_embedding_text, stored_keywords
+from app.services.moderation import (
+    UNREADABLE_COVER,
+    check_imports,
+    dropped_cover_reasons,
+    event_moderation_hash,
+    import_text,
+)
 from app.services.taste_agent import event_content_hash, event_embedding_text
 
 logger = logging.getLogger(__name__)
@@ -33,26 +51,27 @@ _STOPWORDS = frozenset(
 )
 
 
-async def _embedding_texts(db: DBService, events: list[StandardizedEvent]) -> list[str]:
-    """Each row's vector text: its stored keywords when they are still fresh, else the raw text.
+async def _stored_state(db: DBService, events: list[StandardizedEvent]) -> dict[tuple[str, str], dict[str, Any]]:
+    """The rows already here, by (source, source_event_id).
 
-    A failed read raises (the load stops): guessing "no keywords" would give fresh
-    rows a raw-text vector that the reprocessing never fixes.
+    A failed read raises (the load stops): guessing "nothing stored" would give
+    fresh rows a raw-text vector the reprocessing never sees, and would let a
+    hidden row's content back in unchecked.
     """
     stored: dict[tuple[str, str], dict[str, Any]] = {}
     for source in sorted({ev.source for ev in events}):
-        rows = await db.list_source_keywords(source)
+        rows = await db.list_source_state(source)
         stored.update({(source, sid): row for sid, row in rows.items()})
-    texts: list[str] = []
-    for ev in events:
-        row = stored.get((ev.source, ev.source_event_id))
-        fresh = row is not None and row.get("keywords_hash") == event_content_hash(ev.title, ev.description, ev.category)
-        taste = stored_keywords(row) if fresh else None
-        if taste is not None:
-            texts.append(event_embedding_text(ev.title, ev.category, taste))
-        else:
-            texts.append(raw_embedding_text(ev.title, ev.description, ev.category))
-    return texts
+    return stored
+
+
+def _embedding_text(ev: StandardizedEvent, row: dict[str, Any] | None) -> str:
+    """The row's vector text: its stored keywords when they are still fresh, else the raw text."""
+    fresh = row is not None and row.get("keywords_hash") == event_content_hash(ev.title, ev.description, ev.category)
+    taste = stored_keywords(row) if fresh else None
+    if taste is not None:
+        return event_embedding_text(ev.title, ev.category, taste)
+    return raw_embedding_text(ev.title, ev.description, ev.category)
 
 
 def _row(ev: StandardizedEvent, embedding: list[float] | None) -> dict[str, Any]:
@@ -103,19 +122,118 @@ async def _embed(texts: list[str]) -> list[list[float] | None]:
     return out
 
 
-async def upsert_events(db: DBService, events: list[StandardizedEvent]) -> int:
-    """Embed and upsert (conflict on source + source_event_id); returns rows sent."""
+@dataclass(slots=True)
+class LoadResult:
+    upserted: int = 0
+    # Refused by the moderation: never entered, or (already here) hidden.
+    blocked: int = 0
+    # Could not be checked in time: left for the next import.
+    pending: int = 0
+    covers_removed: int = 0
+
+
+def _as_moderated(ev: StandardizedEvent, row: dict[str, Any] | None) -> StandardizedEvent | None:
+    """The item as it goes in when the moderation already saw this content: as it
+    is, or without the cover the moderation dropped (the source keeps sending it).
+    None: it must be checked.
+
+    A hidden row is always checked again: its source may have gone back to content
+    that was allowed, and there are few of them.
+    """
+    if row is None or row.get("moderation_blocked"):
+        return None
+    stored = row.get("moderation_hash")
+    if stored == event_moderation_hash(ev.title, ev.description, ev.cover_url):
+        return ev
+    dropped = row.get("moderation_dropped_cover")
+    if dropped and ev.cover_url == dropped and stored == event_moderation_hash(ev.title, ev.description, None):
+        if UNREADABLE_COVER in (row.get("moderation_reasons") or []) and _retry_due(row.get("moderated_at")):
+            return None
+        return ev.model_copy(update={"cover_url": None})
+    return None
+
+
+def _retry_due(moderated_at: Any) -> bool:
+    """An unreadable cover is checked again once it was last tried long enough ago."""
+    try:
+        when = datetime.fromisoformat(str(moderated_at))
+    except ValueError:
+        return True
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - when >= timedelta(days=settings.UNREADABLE_COVER_RETRY_DAYS)
+
+
+async def upsert_events(
+    db: DBService,
+    events: list[StandardizedEvent],
+    *,
+    moderation_budget_seconds: float | None = None,
+) -> LoadResult:
+    """Moderate what changed, embed and upsert (conflict on source + source_event_id)."""
+    result = LoadResult()
     if not events:
-        return 0
-    vectors = await _embed(await _embedding_texts(db, events))
-    rows = [_row(ev, vec) for ev, vec in zip(events, vectors, strict=True)]
-    # Rows with and without a new vector go in separate requests (same keys in each).
-    groups = [[r for r in rows if "event_embedding" in r], [r for r in rows if "event_embedding" not in r]]
-    written = 0
-    for group in groups:
+        return result
+    stored = await _stored_state(db, events)
+    known = {(ev.source, ev.source_event_id): _as_moderated(ev, stored.get((ev.source, ev.source_event_id))) for ev in events}
+    to_check = [ev for ev in events if known[(ev.source, ev.source_event_id)] is None]
+    budget = settings.IMPORT_MODERATION_BUDGET_SECONDS if moderation_budget_seconds is None else moderation_budget_seconds
+    checks = await check_imports(
+        [(import_text(ev.title, ev.description), ev.cover_url) for ev in to_check], budget_seconds=budget
+    )
+    verdict = {(ev.source, ev.source_event_id): check for ev, check in zip(to_check, checks, strict=True)}
+
+    now = datetime.now(timezone.utc).isoformat()
+    kept: list[tuple[StandardizedEvent, dict[str, Any]]] = []
+    to_block: list[tuple[StandardizedEvent, list[str]]] = []
+    for ev in events:
+        key = (ev.source, ev.source_event_id)
+        as_stored = known[key]
+        if as_stored is not None:
+            kept.append((as_stored, {}))
+            continue
+        check = verdict[key]
+        if check is None:
+            result.pending += 1
+            continue
+        if not check.allowed:
+            result.blocked += 1
+            if key in stored and not stored[key].get("moderation_blocked"):
+                to_block.append((ev, list(check.categories)))
+            continue
+        dropped, reasons = None, None
+        if check.drop_cover and ev.cover_url:
+            # Remembered, so the next import (which still brings it) does not check it
+            # again; one that could not be read is tried again after a while.
+            dropped, reasons = ev.cover_url, dropped_cover_reasons(check)
+            ev = ev.model_copy(update={"cover_url": None})
+            result.covers_removed += 1
+        kept.append(
+            (
+                ev,
+                {
+                    "moderation_hash": event_moderation_hash(ev.title, ev.description, ev.cover_url),
+                    "moderated_at": now,
+                    "moderation_blocked": False,
+                    "moderation_reasons": reasons,
+                    "moderation_dropped_cover": dropped,
+                },
+            )
+        )
+
+    vectors = await _embed([_embedding_text(ev, stored.get((ev.source, ev.source_event_id))) for ev, _ in kept])
+    rows = [{**_row(ev, vec), **extra} for (ev, extra), vec in zip(kept, vectors, strict=True)]
+    # PostgREST takes a bulk request's columns from its rows: rows with and without a
+    # new vector, or a new moderation result, go in separate requests.
+    groups: dict[frozenset[str], list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(frozenset(row), []).append(row)
+    for group in groups.values():
         for start in range(0, len(group), UPSERT_BATCH):
-            written += await db.upsert_events(group[start : start + UPSERT_BATCH])
-    return written
+            result.upserted += await db.upsert_events(group[start : start + UPSERT_BATCH])
+    for ev, categories in to_block:
+        await db.block_imported_event(ev.source, ev.source_event_id, categories)
+    return result
 
 
 # ------------------------------------------------------------------ links --

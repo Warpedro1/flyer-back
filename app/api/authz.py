@@ -86,12 +86,16 @@ def require_media_paths_owned(user_id: str, paths: Iterable[str]) -> None:
     """Reject Storage paths outside the user's own `{user_id}/` folder.
 
     The bucket is private and the backend signs read URLs with service_role, so
-    attaching someone else's path to an event would publish their file. Absolute
-    URLs (legacy media) are never signed and pass through unchanged.
+    attaching someone else's path to an event would publish their file. External
+    URLs are refused too (#22 A): they would reach every viewer unchecked, and the
+    file behind them can change after the moderation saw it.
     """
     for path in paths:
         if _is_absolute_url(path):
-            continue
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="As fotos e os vídeos precisam ser enviados para o Flyer.",
+            )
         folder, _, rest = path.partition("/")
         segments = rest.split("/")
         if folder != user_id or not rest or any(s in {"", ".", ".."} for s in segments):

@@ -6,6 +6,10 @@ Apify calls POST /admin/ingest/apify-webhook, which loads that run's dataset.
 
 POST /admin/events/keywords gives the stale events and places keywords and a new
 vector (#22 B), a chunk per call; by default it only estimates the cost.
+
+POST /admin/events/moderation checks, a chunk per call, the rows the moderation has
+not seen (#22 A): the catalogue that was here before it, and what an import left
+unchecked. The moderation is free, so there is no estimate; ``dry_run`` only counts.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from app.services.etl.pipeline import ingest_dataset
 from app.services.etl.schemas import IngestionReport
 from app.services.etl.sources import SOURCES
 from app.services.event_keywords import all_stale, estimate_cost, reprocess_stale
+from app.services.moderation import moderate_stale
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -94,6 +99,32 @@ class KeywordsReport(BaseModel):
     failed: int = 0
     remaining: int
     estimate: KeywordsEstimate
+
+
+class ModerationRequest(BaseModel):
+    """One call of the moderation pass."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dry_run: bool = False
+    # Imported rows: one image call per cover, 8 at a time. App rows (photos and
+    # icon, 4 rows at a time) may not all fit: what does not finish inside the budget
+    # is left stale for the next call, the rest is written.
+    limit: int = Field(default=100, ge=1, le=100)
+
+
+class ModerationReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dry_run: bool
+    # Rows still unchecked before this call, and after it.
+    pending: int
+    checked: int = 0
+    blocked: int = 0
+    covers_removed: int = 0
+    contacts_removed: int = 0
+    not_checked: int = 0
+    remaining: int
 
 
 def _require_secret(configured: str, given: str | None, name: str) -> None:
@@ -191,4 +222,43 @@ async def reprocess_keywords(
         failed=done.failed,
         remaining=max(0, len(stale) - done.processed),
         estimate=estimate,
+    )
+
+
+async def _count_unmoderated(db: DbServiceDep) -> int:
+    total, page = 0, 1000
+    while True:
+        rows = await db.list_stale_moderation_events(limit=page, offset=total)
+        total += len(rows)
+        if len(rows) < page:
+            return total
+
+
+@router.post("/events/moderation", response_model=ModerationReport)
+@limiter.limit("10/minute")
+async def moderate_catalogue(
+    request: Request,
+    db: DbServiceDep,
+    body: ModerationRequest | None = None,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> ModerationReport:
+    """Check the next unchecked rows (or, with ``dry_run``, only count them).
+
+    Call it again until ``remaining`` is 0; each call fits a 60 s function.
+    """
+    _require_admin(x_admin_token)
+    req = body or ModerationRequest()
+    pending = await _count_unmoderated(db)
+    if req.dry_run:
+        return ModerationReport(dry_run=True, pending=pending, remaining=pending)
+    done = await moderate_stale(db, limit=req.limit, budget_seconds=settings.KEYWORDS_BUDGET_SECONDS)
+    return ModerationReport(
+        dry_run=False,
+        pending=pending,
+        checked=done.checked,
+        blocked=done.blocked,
+        covers_removed=done.covers_removed,
+        contacts_removed=done.contacts_removed,
+        not_checked=done.not_checked,
+        remaining=max(0, pending - done.checked),
     )
