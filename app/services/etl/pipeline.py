@@ -8,6 +8,7 @@ import logging
 import httpx
 
 from app.core.config import settings
+from app.services import error_log
 from app.services.db_service import DBService
 from app.services.etl.apify import fetch_dataset_items
 from app.services.etl.load import link_events_to_places, upsert_events
@@ -46,15 +47,41 @@ async def ingest_dataset(
         return report
     report.fetched = len(raw)
 
+    # A place several searches found is decided by the most specific one, never by
+    # the order Apify output them (a stable sort).
+    ordered = sorted(raw, key=source.precedence)
+    pairs = [(item, ev) for item in ordered if (ev := source.transform(item)) is not None]
+    # Only what pleases most people (decision 2026-10-19).
+    screening = source.screen(pairs)
+    report.warnings = list(screening.warnings)
     events: list[StandardizedEvent] = []
     seen: set[str] = set()
-    for item in raw:
-        ev = source.transform(item)
-        # The same place can come from two searches; one row per source id.
-        if ev is not None and ev.source_event_id not in seen:
-            seen.add(ev.source_event_id)
-            events.append(ev)
+    left_out: set[str] = set()
+    for (_, ev), keep in zip(pairs, screening.keep, strict=True):
+        # The same place can come from two searches; one row per source id, from the
+        # first that keeps it. One left out by a search may still come in through
+        # another, with a lower bar.
+        if ev.source_event_id in seen:
+            continue
+        if not keep:
+            left_out.add(ev.source_event_id)
+            continue
+        seen.add(ev.source_event_id)
+        events.append(ev)
     report.standardized = len(events)
+    report.not_popular = len(left_out - seen)
+    # Most popular first: the moderation budget reaches those first. (The keyword
+    # step below reads the stale rows: events first, then the most reviewed places.)
+    events.sort(key=source.rank)
+    if report.warnings:
+        # Nobody reads the webhook's answer: app_errors is where the owner sees it.
+        logger.warning("ETL popularity signal missing (source=%s): %s", source.name, report.warnings)
+        await error_log.record_error(
+            source="api",
+            code="etl_popularity_signal_missing",
+            route="/admin/ingest/apify-webhook",
+            details={"source": source.name, "warnings": report.warnings},
+        )
 
     # LGPD (#22 A): contacts in the texts never enter, before anything is hashed.
     for i, ev in enumerate(events):
@@ -87,10 +114,11 @@ async def ingest_dataset(
             report.errors.append(f"keywords: {exc}")
 
     logger.info(
-        "ETL run done: source=%s fetched=%d standardized=%d upserted=%d linked=%d keywords=%d "
-        "blocked=%d moderation_pending=%d covers_removed=%d contacts_removed=%d errors=%d",
-        report.source, report.fetched, report.standardized, report.upserted, report.linked,
-        report.keywords, report.blocked, report.moderation_pending, report.covers_removed,
-        report.contacts_removed, len(report.errors),
+        "ETL run done: source=%s fetched=%d standardized=%d not_popular=%d upserted=%d linked=%d "
+        "keywords=%d blocked=%d moderation_pending=%d covers_removed=%d contacts_removed=%d "
+        "warnings=%d errors=%d",
+        report.source, report.fetched, report.standardized, report.not_popular, report.upserted,
+        report.linked, report.keywords, report.blocked, report.moderation_pending,
+        report.covers_removed, report.contacts_removed, len(report.warnings), len(report.errors),
     )
     return report

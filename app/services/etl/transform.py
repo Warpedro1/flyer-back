@@ -18,7 +18,7 @@ from pydantic import ValidationError
 
 from app.models.schemas import EventCategory
 from app.services.etl.schemas import RawEvent, StandardizedEvent
-from app.services.etl.taxonomy import GOOGLE_KEYWORDS, PILOT_SEARCHES, SYMPLA_KEYWORDS
+from app.services.etl.taxonomy import GENERIC_KEEPS, GOOGLE_KEYWORDS, PLACE_SEARCHES, SYMPLA_KEYWORDS, PlaceSearch
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,12 @@ def _str(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _count(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def _float(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -103,13 +109,39 @@ def _build(data: dict[str, Any]) -> StandardizedEvent | None:
 # ------------------------------------------------------------ categories --
 
 
-def google_category(search: str | None, category_name: str | None) -> EventCategory:
-    """The pilot search that found the place, else Google's own category, else `outros`."""
+def place_search(search: str | None) -> PlaceSearch | None:
+    """Which of our searches found the place (Apify echoes it in ``searchString``)."""
     wanted = normalize(search)
-    for query, category in PILOT_SEARCHES:
-        if wanted.startswith(normalize(query) + " "):
-            return category
-    return _first_keyword(normalize(category_name), GOOGLE_KEYWORDS) or "outros"
+    for entry in PLACE_SEARCHES:
+        if wanted.startswith(normalize(entry.term) + " "):
+            return entry
+    return None
+
+
+def google_category(search: str | None, category_name: str | None) -> EventCategory:
+    """The search that found the place, else Google's own category, else `outros`.
+
+    A generic search ("pontos turísticos") yields to Google's own category (a museum
+    it found is still a museum), except to those in `GENERIC_KEEPS`. A place several
+    searches found gets the most specific one's category: `search_precedence`.
+    """
+    found = place_search(search)
+    own = _first_keyword(normalize(category_name), GOOGLE_KEYWORDS)
+    if found and not (found.generic and own and own not in GENERIC_KEEPS):
+        return found.category
+    return own or "outros"
+
+
+def search_precedence(item: RawEvent) -> tuple[int, int]:
+    """Which item of a place found by several searches decides it (lowest first).
+
+    The specific searches before the generic one, then in the plan's order; a search
+    we do not know goes last. Apify's output order never decides.
+    """
+    found = place_search(_str(item.get("searchString")))
+    if found is None:
+        return (2, 0)
+    return (1 if found.generic else 0, PLACE_SEARCHES.index(found))
 
 
 def sympla_category(fmt: str | None, category: str | None) -> EventCategory:
@@ -165,7 +197,8 @@ def sympla_price(item: RawEvent) -> Decimal | None:
 
 def transform_google_place(item: RawEvent) -> StandardizedEvent | None:
     """A Google Maps place (compass/crawler-google-places) as `kind = place`."""
-    if item.get("permanentlyClosed"):
+    # Closed places are dropped here, not by the run: Apify charges its filters.
+    if item.get("permanentlyClosed") or item.get("temporarilyClosed"):
         return None
     location = _dict(item.get("location"))
     lat, lng = _float(location.get("lat")), _float(location.get("lng"))
@@ -197,11 +230,39 @@ def transform_google_place(item: RawEvent) -> StandardizedEvent | None:
             "long": lng,
             "price_level": google_price_level(_str(item.get("price"))),
             "rating": Decimal(str(score)).quantize(Decimal("0.1")) if score is not None else None,
+            "reviews_count": _count(item.get("reviewsCount")),
             "opening_hours": opening_hours,
             "source_url": _text(item.get("url"), 2000),
             "cover_url": _text(item.get("imageUrl"), 2000),
         }
     )
+
+
+def popular_place(
+    item: RawEvent,
+    place: StandardizedEvent,
+    *,
+    counts_known: bool,
+    ratings_known: bool,
+    min_reviews: int,
+    min_reviews_niche: int,
+    min_rating: float,
+) -> bool:
+    """Whether a place is popular enough to come in (decision 2026-10-19).
+
+    Enough Google reviews for its search's tier (a search we do not know gets the
+    broad bar) and a good rating. ``counts_known``/``ratings_known`` say whether the
+    run carries that signal at all: when it does, a place without it has none (no
+    reviews, no rating); when the whole run lacks it, that floor cannot be applied.
+    """
+    if counts_known:
+        found = place_search(_str(item.get("searchString")))
+        needed = min_reviews_niche if found and found.tier == "niche" else min_reviews
+        if (place.reviews_count or 0) < needed:
+            return False
+    if ratings_known and (place.rating is None or float(place.rating) < min_rating):
+        return False
+    return True
 
 
 # ----------------------------------------------------------------- events --
