@@ -205,10 +205,21 @@ async def test_without_review_counts_the_import_warns_and_goes_on() -> None:
 
 
 @pytest.mark.parametrize("generic_first", [True, False])
-async def test_a_place_found_by_two_searches_gets_the_same_category_in_any_order(generic_first: bool) -> None:
-    museum = {**_place_item("paco", 5000, search="museus em Recife"), "categoryName": "Museu"}
-    landmark = {**_place_item("paco", 5000, search="pontos turísticos em Recife"), "categoryName": "Museu"}
-    raw = [landmark, museum] if generic_first else [museum, landmark]
+@pytest.mark.parametrize(
+    ("specific", "google", "expected"),
+    [
+        ("museus em Recife", "Museu", "arte_cultura"),
+        # Google's own category maps to nothing ours: the specific search still wins.
+        ("mercados públicos e feiras em Recife", "Mercado", "feira_mercado"),
+        ("parques em Recife", "Atração turística", "praia_natureza"),
+    ],
+)
+async def test_a_place_found_by_two_searches_gets_the_same_category_in_any_order(
+    generic_first: bool, specific: str, google: str, expected: str
+) -> None:
+    found = {**_place_item("paco", 5000, search=specific), "categoryName": google}
+    landmark = {**_place_item("paco", 5000, search="pontos turísticos em Recife"), "categoryName": google}
+    raw = [landmark, found] if generic_first else [found, landmark]
 
     with (
         patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=raw)),
@@ -218,7 +229,24 @@ async def test_a_place_found_by_two_searches_gets_the_same_category_in_any_order
     ):
         await ingest_dataset(MagicMock(), MagicMock(), SOURCES["google_maps"], "ds-1", "tok")
 
-    assert [e.category for e in upsert.await_args.args[1]] == ["arte_cultura"]
+    assert [e.category for e in upsert.await_args.args[1]] == [expected]
+
+
+@pytest.mark.parametrize("bars_first", [True, False])
+async def test_between_two_specific_searches_the_first_in_the_plan_wins(bars_first: bool) -> None:
+    restaurant = _place_item("x", 900, search="restaurantes em Boa Viagem, Recife")
+    bar = _place_item("x", 900, search="bares em Boa Viagem, Recife")
+    raw = [bar, restaurant] if bars_first else [restaurant, bar]
+
+    with (
+        patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=raw)),
+        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=LoadResult(upserted=1))) as upsert,
+        patch("app.services.etl.pipeline.link_events_to_places", AsyncMock(return_value=0)),
+        patch("app.services.etl.pipeline.reprocess_stale", AsyncMock(return_value=ReprocessResult(0, 0, 0))),
+    ):
+        await ingest_dataset(MagicMock(), MagicMock(), SOURCES["google_maps"], "ds-1", "tok")
+
+    assert [e.category for e in upsert.await_args.args[1]] == ["comida_bebida"]
 
 
 async def test_ingest_dataset_counts_the_places_left_out() -> None:

@@ -20,7 +20,12 @@ from typing import Any, Literal
 from app.core.config import settings
 from app.services.etl.schemas import RawEvent, StandardizedEvent
 from app.services.etl.taxonomy import BROAD_APPEAL_CATEGORIES, PLACE_SEARCHES
-from app.services.etl.transform import popular_place, transform_google_place, transform_sympla_event
+from app.services.etl.transform import (
+    popular_place,
+    search_precedence,
+    transform_google_place,
+    transform_sympla_event,
+)
 
 __all__ = ["AREAS", "CITY", "SOURCES", "ApifySource", "Screening"]
 
@@ -60,6 +65,10 @@ def _as_loaded(ev: StandardizedEvent) -> tuple[Any, ...]:
     return ()
 
 
+def _in_dataset_order(item: RawEvent) -> tuple[Any, ...]:
+    return ()
+
+
 @dataclass(frozen=True)
 class ApifySource:
     name: SourceName
@@ -67,8 +76,10 @@ class ApifySource:
     max_charge_usd: float
     build_input: Callable[[], dict[str, Any]]
     transform: Callable[[RawEvent], StandardizedEvent | None]
-    # Which transformed items come in (it sees the whole run), and the order the run
-    # is loaded in.
+    # Which of the items for the same source id decides it (lowest first), which
+    # transformed items come in (it sees the whole run), and the order the run is
+    # loaded in.
+    precedence: Callable[[RawEvent], tuple[Any, ...]] = _in_dataset_order
     screen: Callable[[Pairs], Screening] = _keep_all
     rank: Callable[[StandardizedEvent], tuple[Any, ...]] = _as_loaded
 
@@ -151,6 +162,7 @@ SOURCES: dict[str, ApifySource] = {
         max_charge_usd=2.4,
         build_input=_google_maps_input,
         transform=transform_google_place,
+        precedence=search_precedence,
         screen=_popular_places,
         rank=_most_reviewed_first,
     ),

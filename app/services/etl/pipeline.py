@@ -47,7 +47,10 @@ async def ingest_dataset(
         return report
     report.fetched = len(raw)
 
-    pairs = [(item, ev) for item in raw if (ev := source.transform(item)) is not None]
+    # A place several searches found is decided by the most specific one, never by
+    # the order Apify output them (a stable sort).
+    ordered = sorted(raw, key=source.precedence)
+    pairs = [(item, ev) for item in ordered if (ev := source.transform(item)) is not None]
     # Only what pleases most people (decision 2026-10-19).
     screening = source.screen(pairs)
     report.warnings = list(screening.warnings)
@@ -55,8 +58,9 @@ async def ingest_dataset(
     seen: set[str] = set()
     left_out: set[str] = set()
     for (_, ev), keep in zip(pairs, screening.keep, strict=True):
-        # The same place can come from two searches; one row per source id. One left
-        # out by a search may still come in through another, with a lower bar.
+        # The same place can come from two searches; one row per source id, from the
+        # first that keeps it. One left out by a search may still come in through
+        # another, with a lower bar.
         if ev.source_event_id in seen:
             continue
         if not keep:

@@ -60,6 +60,11 @@ PLACE_SEARCHES: tuple[PlaceSearch, ...] = (
     PlaceSearch("jogos de tabuleiro", "jogos", "niche"),
 )
 
+# Google's own categories a generic search does not yield to: a historic church
+# found as a city icon stays a tourist spot (Google calls some "Igreja", others
+# "Basílica" or "Catedral", which no keyword catches).
+GENERIC_KEEPS: frozenset[EventCategory] = frozenset({"religiao_espiritualidade"})
+
 # The events that go first (decision 2026-10-19: shows, parties, festivals and
 # theatre; Sympla's festivals come as "festas e shows"). They come first in the
 # import (so the moderation budget reaches them first) and, without a profile, in

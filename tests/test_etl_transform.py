@@ -106,6 +106,10 @@ def test_no_search_is_the_start_of_another() -> None:
         ("Teatro", "teatro_cinema"),
         ("Ponto de referência histórico", "turismo_passeio"),
         (None, "turismo_passeio"),
+        # A historic church found as a city icon stays a tourist spot, whatever
+        # Google calls it ("Igreja católica", "Basílica", "Catedral").
+        ("Igreja católica", "turismo_passeio"),
+        ("Basílica", "turismo_passeio"),
     ],
 )
 def test_the_generic_search_defers_to_googles_own_category(category_name: str | None, expected: str) -> None:

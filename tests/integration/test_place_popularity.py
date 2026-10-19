@@ -196,6 +196,32 @@ def test_without_a_profile_the_same_rows_come_only_in_another_order(pdb: Any) ->
     assert len(before) < 200
 
 
+def test_without_a_profile_places_without_a_count_go_by_rating(pdb: Any) -> None:
+    # The pilot's places until the next import: no count, so the rating decides.
+    ratings = ["4.10", "4.90", None, "4.50", "4.70", "3.80"]
+    ids = {rating: _place(pdb, category="comida_bebida", rating=rating) for rating in ratings}
+
+    assert _match(pdb, None) == [ids[r] for r in ("4.90", "4.70", "4.50", "4.10", "3.80", None)]
+
+
+def test_without_a_profile_a_theatre_place_still_comes_after_every_event(pdb: Any) -> None:
+    theatre = _place(pdb, category="teatro_cinema", reviews=20000)
+    talk = _row(pdb, category="palestra_conhecimento", days=3)
+
+    assert _match(pdb, None) == [talk, theatre]
+
+
+def test_an_event_in_progress_is_still_discovered(pdb: Any) -> None:
+    started = pdb.execute(
+        "insert into public.events (kind, category, lat, long, event_date, ends_at) "
+        "values ('event', 'musica_show', %s, %s, now() - interval '1 hour', now() + interval '2 hours') returning id",
+        (LAT, LNG),
+    ).fetchone()[0]
+
+    assert _match(pdb, None) == [str(started)]
+    assert _match(pdb, _unit(0)) == [str(started)]
+
+
 def test_without_a_profile_events_without_a_category_go_with_the_others_by_date(pdb: Any) -> None:
     talk = _row(pdb, category="palestra_conhecimento", days=1)
     unknown = _row(pdb, category=None, days=2)

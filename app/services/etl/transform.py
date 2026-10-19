@@ -18,7 +18,7 @@ from pydantic import ValidationError
 
 from app.models.schemas import EventCategory
 from app.services.etl.schemas import RawEvent, StandardizedEvent
-from app.services.etl.taxonomy import GOOGLE_KEYWORDS, PLACE_SEARCHES, SYMPLA_KEYWORDS, PlaceSearch
+from app.services.etl.taxonomy import GENERIC_KEEPS, GOOGLE_KEYWORDS, PLACE_SEARCHES, SYMPLA_KEYWORDS, PlaceSearch
 
 logger = logging.getLogger(__name__)
 
@@ -121,14 +121,27 @@ def place_search(search: str | None) -> PlaceSearch | None:
 def google_category(search: str | None, category_name: str | None) -> EventCategory:
     """The search that found the place, else Google's own category, else `outros`.
 
-    A generic search ("pontos turísticos") yields to Google's own category: a museum
-    it found is still a museum, whichever of the two searches Apify output first.
+    A generic search ("pontos turísticos") yields to Google's own category (a museum
+    it found is still a museum), except to those in `GENERIC_KEEPS`. A place several
+    searches found gets the most specific one's category: `search_precedence`.
     """
     found = place_search(search)
     own = _first_keyword(normalize(category_name), GOOGLE_KEYWORDS)
-    if found and not (found.generic and own):
+    if found and not (found.generic and own and own not in GENERIC_KEEPS):
         return found.category
     return own or "outros"
+
+
+def search_precedence(item: RawEvent) -> tuple[int, int]:
+    """Which item of a place found by several searches decides it (lowest first).
+
+    The specific searches before the generic one, then in the plan's order; a search
+    we do not know goes last. Apify's output order never decides.
+    """
+    found = place_search(_str(item.get("searchString")))
+    if found is None:
+        return (2, 0)
+    return (1 if found.generic else 0, PLACE_SEARCHES.index(found))
 
 
 def sympla_category(fmt: str | None, category: str | None) -> EventCategory:
