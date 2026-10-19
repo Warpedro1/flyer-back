@@ -106,6 +106,13 @@ def _says(flagged: dict[str, list[str]], *, images: Any = None) -> Any:
         ("Temporada 9 2025 - 2026", []),
         ("Capacidade: 15 3000 - 4000 pessoas", []),
         ("Anos 80 2000 - 2010", []),
+        ("Copa Sub-17 2025-2026", []),
+        ("Turma 15 2020-2025", []),
+        ("Temporada 9 2025-2026", []),
+        ("Sub 11 2014-2015, Anos 80 2000-2010", []),
+        # With the area code in parentheses a spaced dash is a phone again.
+        ("Informações: (81) 3222 - 1234", ["telefone"]),
+        ("WhatsApp: 9 8765 - 4321", ["telefone"]),
         ("Ingresso R$ 1.234,56, dia 12/10/2026 às 19:30", []),
         ("CNPJ 12.345.678/0001-90, CEP 50030-230", []),
         ("Rua da Aurora, 1234, sala 3001", []),

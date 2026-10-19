@@ -29,14 +29,23 @@ _SEP = rf"[{_SPACES}.{_DASHES}]"
 # After a mobile's first five digits the dash may have spaces around it
 # ("98765 - 4321"); not after anything else, or "Sub-17 2025 - 2026" would be a phone.
 _LAST = rf"(?:[{_SPACES}]*[{_DASHES}][{_SPACES}]*|{_SEP})"
+# Two years, as in "2025-2026" or "Sub-17 2025-2026": never the digits of a phone
+# unless the area code is in parentheses.
+_NOT_YEARS = rf"(?!(?:19|20)\d{{2}}{_LAST}(?:19|20)\d{{2}}(?![\w]))"
 # A Brazilian number with its area code, with or without +55 and with or without a
-# leading 0 ("(081)"): mobiles (9 and 8 digits, often written "9 9999-8888") and
-# landlines (8 digits starting with 2 to 5). Without the area code only a mobile
-# written with its separator counts ("99999-8888", "9 9999-8888"): bare 8-digit runs
-# are too often something else ("2025-2026", "1234-5678").
+# leading 0: mobiles (9 and 8 digits, often written "9 9999-8888") and landlines
+# (8 digits starting with 2 to 5). With the area code in parentheses ("(81) 3222 -
+# 1234") the dash before the last four digits may have spaces around it; without
+# them only after a mobile's first five digits. Without the area code only a mobile
+# written with its separators counts ("99999-8888", "9 9999-8888"): bare 8-digit
+# runs are too often something else ("2025-2026", "1234-5678").
 _PHONE = re.compile(
-    rf"(?<![\w])(?:(?:\+?55{_SEP}?)?\(?0?\d{{2}}\)?{_SEP}?(?:9{_SEP}?\d{{4}}{_LAST}?|[2-5]\d{{3}}{_SEP}?)\d{{4}}"
-    rf"|9\d{{4}}{_LAST}\d{{4}}|9{_SEP}\d{{4}}{_SEP}\d{{4}})(?![\w])"
+    rf"(?<![\w])(?:"
+    rf"(?:\+?55{_SEP}?)?\(0?\d{{2}}\){_SEP}?(?:9{_SEP}?\d{{4}}|[2-5]\d{{3}}){_LAST}?\d{{4}}"
+    rf"|(?:\+?55{_SEP}?)?0?\d{{2}}{_SEP}?(?:9{_SEP}?\d{{4}}{_LAST}?|{_NOT_YEARS}[2-5]\d{{3}}{_SEP}?)\d{{4}}"
+    rf"|9\d{{4}}{_LAST}\d{{4}}"
+    rf"|9{_SEP}{_NOT_YEARS}\d{{4}}{_LAST}\d{{4}}"
+    rf")(?![\w])"
 )
 _CPF = re.compile(r"(?<!\d)\d{3}\.?\d{3}\.?\d{3}-?\d{2}(?!\d)")
 
