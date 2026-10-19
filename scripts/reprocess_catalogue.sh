@@ -6,15 +6,22 @@
 #   2. keywords (#22 part B, paid): POST /admin/events/keywords, after showing the
 #      cost estimate and asking for an "s".
 #
-# Run it on your own machine. The admin token (ADMIN_INGEST_TOKEN, the value set in
-# Vercel) is typed without echo, kept only in this process and never written to the
-# shell history.
+# Run it on your own machine, or from GitHub with the "Reprocessar catálogo" workflow
+# (.github/workflows/reprocess-catalogue.yml). The admin token (ADMIN_INGEST_TOKEN,
+# the value set in Vercel) comes from that environment variable (a GitHub secret in
+# the workflow) or is typed without echo; it stays in this process and is never
+# written to the shell history. REPROCESS_KEYWORDS=s|n answers the keyword question
+# without asking (no answer and no terminal: the keywords are not run).
 set -euo pipefail
 
 API="${FLYER_API:-https://flyer-back.vercel.app}"
 
-read -rsp "ADMIN_INGEST_TOKEN: " TOKEN
-echo
+if [ -n "${ADMIN_INGEST_TOKEN:-}" ]; then
+  TOKEN=$ADMIN_INGEST_TOKEN
+else
+  read -rsp "ADMIN_INGEST_TOKEN: " TOKEN
+  echo
+fi
 
 # The header goes through a file descriptor (printf is a builtin), so the token
 # never shows in the process list.
@@ -72,6 +79,13 @@ if ! estimate=$(call keywords '{}'); then
   exit 1
 fi
 echo "$estimate"
-read -rp "Rodar as palavras-chave agora? (s/N) " answer
+if [ -n "${REPROCESS_KEYWORDS:-}" ]; then
+  answer=$REPROCESS_KEYWORDS
+  echo "Rodar as palavras-chave agora? $answer"
+elif [ -t 0 ]; then
+  read -rp "Rodar as palavras-chave agora? (s/N) " answer
+else
+  answer=n
+fi
 [ "$answer" = "s" ] || { echo "Palavras-chave não rodadas."; exit 0; }
 rounds keywords '{"dry_run": false, "limit": 100}' processed

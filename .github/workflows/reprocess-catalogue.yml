@@ -1,0 +1,46 @@
+name: Reprocessar catálogo
+
+# Roda scripts/reprocess_catalogue.sh contra a produção: primeiro a moderação do que
+# ainda não foi verificado (grátis) e depois, se marcado, as palavras-chave (pago; a
+# estimativa aparece no log antes). Só roda quando alguém clica em "Run workflow".
+#
+# Precisa do segredo ADMIN_INGEST_TOKEN (Settings → Secrets and variables → Actions),
+# com o mesmo valor da variável da Vercel. O GitHub esconde o valor nos logs.
+on:
+  workflow_dispatch:
+    inputs:
+      palavras_chave:
+        description: 'Também gerar as palavras-chave (pago: ~US$ 0,11 para o acervo de 2026-10; a estimativa sai no log)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# Duas execuções ao mesmo tempo processariam as mesmas linhas.
+concurrency:
+  group: reprocessar-catalogo
+  cancel-in-progress: false
+
+jobs:
+  reprocessar:
+    name: Moderação e palavras-chave
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Conferir o segredo
+        env:
+          ADMIN_INGEST_TOKEN: ${{ secrets.ADMIN_INGEST_TOKEN }}
+        run: |
+          if [ -z "$ADMIN_INGEST_TOKEN" ]; then
+            echo "::error::Crie o segredo ADMIN_INGEST_TOKEN em Settings → Secrets and variables → Actions, com o mesmo valor da Vercel."
+            exit 1
+          fi
+
+      - name: Reprocessar
+        env:
+          ADMIN_INGEST_TOKEN: ${{ secrets.ADMIN_INGEST_TOKEN }}
+          REPROCESS_KEYWORDS: ${{ inputs.palavras_chave && 's' || 'n' }}
+        run: bash scripts/reprocess_catalogue.sh
