@@ -221,6 +221,8 @@ def test_a_google_place_becomes_a_place_with_source_coordinates() -> None:
         {"placeId": None},
         {"title": ""},
         {"permanentlyClosed": True},
+        # The run no longer asks Apify to skip closed places (a paid filter).
+        {"temporarilyClosed": True},
     ],
 )
 def test_google_places_that_cannot_be_used_are_dropped(overrides: dict[str, Any]) -> None:
@@ -253,9 +255,9 @@ BARS = {"min_reviews": 300, "min_reviews_niche": 50, "min_rating": 4.2}
         ("yoga e spa em Recife", 80, 3.9, False),
         # A search we do not know gets the broad bar.
         ("oficinas mecânicas em Recife", 120, 4.5, False),
-        # Unknown is not unpopular: kept (and ranked last).
-        ("parques em Recife", None, 4.5, True),
-        ("parques em Recife", 900, None, True),
+        # When the run carries counts and ratings, a place without one has none.
+        ("parques em Recife", None, 4.5, False),
+        ("parques em Recife", 900, None, False),
     ],
 )
 def test_only_popular_places_are_kept(search: str, reviews: int | None, score: float | None, kept: bool) -> None:
@@ -263,7 +265,18 @@ def test_only_popular_places_are_kept(search: str, reviews: int | None, score: f
     place = transform_google_place(item)
 
     assert place is not None
-    assert popular_place(item, place, **BARS) is kept
+    assert popular_place(item, place, counts_known=True, ratings_known=True, **BARS) is kept
+
+
+def test_without_counts_in_the_run_only_the_rating_decides() -> None:
+    # A run whose places carry no review count at all: the floor cannot be applied.
+    quiet = google_item(reviewsCount=None, totalScore=4.5)
+    low = google_item(reviewsCount=None, totalScore=3.8)
+
+    for item, kept in ((quiet, True), (low, False)):
+        place = transform_google_place(item)
+        assert place is not None
+        assert popular_place(item, place, counts_known=False, ratings_known=True, **BARS) is kept
 
 
 # ----------------------------------------------------------------- events --

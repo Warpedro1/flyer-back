@@ -56,10 +56,11 @@ PLACE_SEARCHES: tuple[PlaceSearch, ...] = (
     PlaceSearch("jogos de tabuleiro", "jogos", "niche"),
 )
 
-# Categories most people enjoy. Their events come first in the import (so the
-# moderation and keyword budgets reach them first) and, without a profile, in
-# discovery: `match_events` repeats this list (migration 20261019000000), and a test
-# keeps the two the same.
+# Categories of events most people enjoy (the owner: shows, parties, festivals and
+# theatre go first). Their events come first in the import (so the moderation and
+# keyword budgets reach them first) and, without a profile, in discovery:
+# `match_events` repeats this list (migration 20261019000000), and a test keeps the
+# two the same.
 BROAD_APPEAL_CATEGORIES: frozenset[EventCategory] = frozenset(
     {
         "comida_bebida",
@@ -67,7 +68,6 @@ BROAD_APPEAL_CATEGORIES: frozenset[EventCategory] = frozenset(
         "musica_show",
         "arte_cultura",
         "teatro_cinema",
-        "desporto",
         "praia_natureza",
         "turismo_passeio",
         "feira_mercado",

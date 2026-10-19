@@ -594,7 +594,9 @@ class DBService:
         """Event and place ids within the radius, best match first (max 200, no past events).
 
         ``query_embedding=None`` is the fallback for users without an interest
-        vector: the same nearby items, soonest first. Filters left as None are not
+        vector: the same nearby items, what pleases most people first (events of
+        broad appeal, each group by date, then the most reviewed places; migration
+        ``place_popularity``). Filters left as None are not
         sent and the function's defaults (no filter) apply. See the
         ``places_catalog`` migration for how places meet the date and price filters.
         """
@@ -1306,9 +1308,9 @@ class DBService:
                 # Hidden rows need no keywords (#22 A).
                 "moderation_blocked": "is.false",
                 "select": "id,kind,title,description,category",
-                # The most reviewed places first (decision 2026-10-19); the id keeps
-                # the pages stable.
-                "order": "reviews_count.desc.nullslast,id.asc",
+                # Events first (few, and they pass), then the most reviewed places
+                # (decision 2026-10-19); the id keeps the pages stable.
+                "order": "kind.asc,reviews_count.desc.nullslast,id.asc",
                 "limit": str(limit),
                 "offset": str(offset),
             },

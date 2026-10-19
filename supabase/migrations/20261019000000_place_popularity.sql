@@ -63,13 +63,14 @@ as $fn$
          end as similarity,
          n.distance_km
     from nearby n
+   where n.distance_km <= radius_km
    order by
      (query_embedding is not null and n.event_embedding is null),
      case when query_embedding is not null then n.event_embedding <=> query_embedding end,
      -- Without a profile: events of broad appeal first (places sort after every event).
      case when query_embedding is null and n.kind = 'event' then not coalesce(n.category = any (array[
        'comida_bebida', 'vida_noturna', 'musica_show', 'arte_cultura', 'teatro_cinema',
-       'desporto', 'praia_natureza', 'turismo_passeio', 'feira_mercado', 'familia_criancas'
+       'praia_natureza', 'turismo_passeio', 'feira_mercado', 'familia_criancas'
      ]::text[]), false) end,
      n.event_date asc nulls last,
      -- Without a profile: the most reviewed places first, then the better rated.

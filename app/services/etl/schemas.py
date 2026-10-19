@@ -63,4 +63,7 @@ class IngestionReport(BaseModel):
     moderation_pending: int = 0
     covers_removed: int = 0
     contacts_removed: int = 0
+    # Something the owner should know that did not stop the run (e.g. a popularity
+    # signal missing from the source).
+    warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)

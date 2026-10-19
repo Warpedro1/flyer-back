@@ -94,12 +94,20 @@ async def test_the_months_usage_comes_from_the_account_limits() -> None:
 
 
 def test_the_catalogue_stays_within_its_budget() -> None:
-    # Decision 2026-10-11: ~3 USD a round. Apify stops charging at the cap, so what
-    # the run asks for must fit under it (0.004 USD a place, 0.008 a Sympla event).
+    # Decision 2026-10-11: ~3 USD a round. Apify stops charging at the cap, so all
+    # the run asks for must fit under it, start fee included; a paid filter would
+    # add 0.001 USD a place (the pilot's skipClosedPlaces cut it at 480 of 600).
     assert sum(s.max_charge_usd for s in SOURCES.values()) <= 3.0
     places = SOURCES["google_maps"].run_input()
-    assert len(places["searchStringsArray"]) * places["maxCrawledPlacesPerSearch"] * 0.004 <= SOURCES["google_maps"].max_charge_usd
-    assert SOURCES["sympla"].run_input()["maxItems"] * 0.008 <= SOURCES["sympla"].max_charge_usd - 0.02
+    assert not places["skipClosedPlaces"]
+    assert not places["scrapePlaceDetailPage"]
+    wanted = len(places["searchStringsArray"]) * places["maxCrawledPlacesPerSearch"]
+    assert 0.007 + wanted * 0.004 <= SOURCES["google_maps"].max_charge_usd
+    assert 0.02 + SOURCES["sympla"].run_input()["maxItems"] * 0.008 <= SOURCES["sympla"].max_charge_usd
+
+
+def test_a_month_fits_google_maps_and_four_sympla_runs() -> None:
+    assert SOURCES["google_maps"].max_charge_usd + 4 * SOURCES["sympla"].max_charge_usd <= settings.APIFY_MONTHLY_BUDGET_USD
 
 
 def test_the_searches_favour_what_pleases_most_people() -> None:
@@ -108,6 +116,7 @@ def test_the_searches_favour_what_pleases_most_people() -> None:
     searches = SOURCES["google_maps"].run_input()["searchStringsArray"]
 
     assert len(searches) == 26
+    assert len(set(searches)) == 26
     assert "parques em Recife" in searches
     assert "pontos turísticos em Recife" in searches
     assert sum(s.startswith("restaurantes ") for s in searches) == 4
@@ -168,9 +177,31 @@ async def test_ingest_dataset_keeps_the_popular_places_most_reviewed_first() -> 
         report = await ingest_dataset(MagicMock(), MagicMock(), SOURCES["google_maps"], "ds-1", "tok")
 
     loaded = upsert.await_args.args[1]
-    assert [e.source_event_id for e in loaded] == ["many", "some", "few", "niche", "unknown"]
+    assert [e.source_event_id for e in loaded] == ["many", "some", "few", "niche"]
     assert next(e for e in loaded if e.source_event_id == "few").category == "cursos_oficinas"
-    assert report.not_popular == 0
+    # The run carries counts, so the place without one has none.
+    assert report.not_popular == 1
+    assert report.warnings == []
+
+
+async def test_without_review_counts_the_import_warns_and_goes_on() -> None:
+    raw = [_place_item("a", None), _place_item("b", None, score=3.5)]
+
+    with (
+        patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=raw)),
+        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=LoadResult(upserted=1))) as upsert,
+        patch("app.services.etl.pipeline.link_events_to_places", AsyncMock(return_value=0)),
+        patch("app.services.etl.pipeline.reprocess_stale", AsyncMock(return_value=ReprocessResult(0, 0, 0))),
+        patch("app.services.etl.pipeline.error_log.record_error", AsyncMock()) as record,
+    ):
+        report = await ingest_dataset(MagicMock(), MagicMock(), SOURCES["google_maps"], "ds-1", "tok")
+
+    # Only the rating could be applied; the owner learns why from app_errors.
+    assert [e.source_event_id for e in upsert.await_args.args[1]] == ["a"]
+    assert report.errors == []
+    assert report.warnings and "reviewsCount" in report.warnings[0]
+    record.assert_awaited_once()
+    assert record.await_args.kwargs["code"] == "etl_popularity_signal_missing"
 
 
 async def test_ingest_dataset_counts_the_places_left_out() -> None:

@@ -179,7 +179,8 @@ def sympla_price(item: RawEvent) -> Decimal | None:
 
 def transform_google_place(item: RawEvent) -> StandardizedEvent | None:
     """A Google Maps place (compass/crawler-google-places) as `kind = place`."""
-    if item.get("permanentlyClosed"):
+    # Closed places are dropped here, not by the run: Apify charges its filters.
+    if item.get("permanentlyClosed") or item.get("temporarilyClosed"):
         return None
     location = _dict(item.get("location"))
     lat, lng = _float(location.get("lat")), _float(location.get("lng"))
@@ -223,6 +224,8 @@ def popular_place(
     item: RawEvent,
     place: StandardizedEvent,
     *,
+    counts_known: bool,
+    ratings_known: bool,
     min_reviews: int,
     min_reviews_niche: int,
     min_rating: float,
@@ -230,16 +233,18 @@ def popular_place(
     """Whether a place is popular enough to come in (decision 2026-10-19).
 
     Enough Google reviews for its search's tier (a search we do not know gets the
-    broad bar) and, when it has a score, a good one. A place whose review count the
-    source did not give is kept: unknown is not unpopular, and it is ranked last.
+    broad bar) and a good rating. ``counts_known``/``ratings_known`` say whether the
+    run carries that signal at all: when it does, a place without it has none (no
+    reviews, no rating); when the whole run lacks it, that floor cannot be applied.
     """
-    if place.reviews_count is None:
-        return True
-    found = place_search(_str(item.get("searchString")))
-    needed = min_reviews_niche if found and found.tier == "niche" else min_reviews
-    if place.reviews_count < needed:
+    if counts_known:
+        found = place_search(_str(item.get("searchString")))
+        needed = min_reviews_niche if found and found.tier == "niche" else min_reviews
+        if (place.reviews_count or 0) < needed:
+            return False
+    if ratings_known and (place.rating is None or float(place.rating) < min_rating):
         return False
-    return place.rating is None or float(place.rating) >= min_rating
+    return True
 
 
 # ----------------------------------------------------------------- events --

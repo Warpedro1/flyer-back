@@ -10,8 +10,8 @@ only popular places come in (`keep`), and each run is loaded most popular first
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Literal
@@ -21,7 +21,7 @@ from app.services.etl.schemas import RawEvent, StandardizedEvent
 from app.services.etl.taxonomy import BROAD_APPEAL_CATEGORIES, PLACE_SEARCHES
 from app.services.etl.transform import popular_place, transform_google_place, transform_sympla_event
 
-__all__ = ["AREAS", "CITY", "SOURCES", "ApifySource"]
+__all__ = ["AREAS", "CITY", "SOURCES", "ApifySource", "Screening"]
 
 SourceName = Literal["google_maps", "sympla"]
 
@@ -40,9 +40,19 @@ PLACES_PER_SEARCH = 20
 
 _LAST = datetime.max.replace(tzinfo=timezone.utc)
 
+Pairs = Sequence[tuple[RawEvent, StandardizedEvent]]
 
-def _keep_all(item: RawEvent, ev: StandardizedEvent) -> bool:
-    return True
+
+@dataclass(frozen=True)
+class Screening:
+    """Which items of a run come in, and what the owner should know about it."""
+
+    keep: list[bool]
+    warnings: list[str] = field(default_factory=list)
+
+
+def _keep_all(pairs: Pairs) -> Screening:
+    return Screening([True] * len(pairs))
 
 
 def _as_loaded(ev: StandardizedEvent) -> tuple[Any, ...]:
@@ -56,8 +66,9 @@ class ApifySource:
     max_charge_usd: float
     build_input: Callable[[], dict[str, Any]]
     transform: Callable[[RawEvent], StandardizedEvent | None]
-    # Whether a transformed item comes in at all, and the order the run is loaded in.
-    keep: Callable[[RawEvent, StandardizedEvent], bool] = _keep_all
+    # Which transformed items come in (it sees the whole run), and the order the run
+    # is loaded in.
+    screen: Callable[[Pairs], Screening] = _keep_all
     rank: Callable[[StandardizedEvent], tuple[Any, ...]] = _as_loaded
 
     def run_input(self) -> dict[str, Any]:
@@ -72,14 +83,29 @@ def _place_searches() -> list[str]:
     ]
 
 
-def _popular_place(item: RawEvent, ev: StandardizedEvent) -> bool:
-    return popular_place(
-        item,
-        ev,
-        min_reviews=settings.PLACES_MIN_REVIEWS,
-        min_reviews_niche=settings.PLACES_MIN_REVIEWS_NICHE,
-        min_rating=settings.PLACES_MIN_RATING,
-    )
+def _popular_places(pairs: Pairs) -> Screening:
+    # Whether the run carries counts and ratings at all: if Apify stops sending one,
+    # its floor is skipped (and said) instead of every place being dropped.
+    counts_known = any(ev.reviews_count is not None for _, ev in pairs)
+    ratings_known = any(ev.rating is not None for _, ev in pairs)
+    warnings = [
+        f"{name} missing from every place: its floor was not applied"
+        for name, known in (("reviewsCount", counts_known), ("totalScore", ratings_known))
+        if pairs and not known
+    ]
+    keep = [
+        popular_place(
+            item,
+            ev,
+            counts_known=counts_known,
+            ratings_known=ratings_known,
+            min_reviews=settings.PLACES_MIN_REVIEWS,
+            min_reviews_niche=settings.PLACES_MIN_REVIEWS_NICHE,
+            min_rating=settings.PLACES_MIN_RATING,
+        )
+        for item, ev in pairs
+    ]
+    return Screening(keep, warnings)
 
 
 def _most_reviewed_first(ev: StandardizedEvent) -> tuple[Any, ...]:
@@ -97,7 +123,9 @@ def _google_maps_input() -> dict[str, Any]:
         "maxCrawledPlacesPerSearch": PLACES_PER_SEARCH,
         "language": "pt-BR",
         "countryCode": "br",
-        "skipClosedPlaces": True,
+        # A paid filter (0.001 USD a place: it cut the pilot at 480 of 600); the
+        # transform drops closed places instead.
+        "skipClosedPlaces": False,
         "scrapePlaceDetailPage": False,
     }
 
@@ -122,7 +150,7 @@ SOURCES: dict[str, ApifySource] = {
         max_charge_usd=2.4,
         build_input=_google_maps_input,
         transform=transform_google_place,
-        keep=_popular_place,
+        screen=_popular_places,
         rank=_most_reviewed_first,
     ),
     "sympla": ApifySource(
