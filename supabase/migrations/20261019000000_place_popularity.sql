@@ -2,9 +2,9 @@
 --
 -- The Google Maps import keeps only popular places (enough reviews and a good
 -- rating) and stores how many reviews each has. Discovery without a profile (no
--- query vector) then shows the events of broad appeal before the others, each group
--- by date, and the places most reviewed first. With a profile the order stays by
--- similarity, as before.
+-- query vector) then shows shows, parties, festivals and theatre before the other
+-- events, each group by date, and the places most reviewed first. With a profile
+-- the order stays by similarity, as before.
 
 -- `rating` was created in the dashboard, before the versioned migrations; it is
 -- declared here so the order below also holds on a fresh database.
