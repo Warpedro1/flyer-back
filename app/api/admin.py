@@ -15,9 +15,11 @@ unchecked. The moderation is free, so there is no estimate; ``dry_run`` only cou
 from __future__ import annotations
 
 import hmac
+import logging
 from decimal import Decimal
 from typing import Annotated, Literal
 
+import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -31,6 +33,8 @@ from app.services.etl.schemas import IngestionReport
 from app.services.etl.sources import SOURCES
 from app.services.event_keywords import all_stale, estimate_cost, reprocess_stale
 from app.services.moderation import moderate_stale
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -173,7 +177,10 @@ async def trigger_ingest(
     # charge cap does not fit what is left of the month.
     try:
         used, account_limit = await monthly_usage(http, token)
-    except Exception:
+    except Exception as exc:
+        # The status says whether it is Apify being down or the token being refused.
+        status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+        logger.warning("Apify usage unavailable (%s %s)", type(exc).__name__, status_code)
         raise ApiError(
             503, "apify_usage_unavailable", "Não conseguimos consultar o gasto do mês no Apify. Tente de novo mais tarde."
         ) from None

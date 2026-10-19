@@ -9,12 +9,17 @@ name: Importar catálogo
 # créditos, o job só avisa e termina sem erro.
 #
 # Precisa do segredo ADMIN_INGEST_TOKEN (Settings → Secrets and variables → Actions).
+#
+# O repositório é público: o GitHub desliga o agendamento depois de 60 dias sem
+# atividade (e avisa por e-mail). Para religar: Actions → Importar catálogo →
+# Enable workflow.
 on:
   schedule:
     # Sympla toda segunda (teto de US$ 0,60 por corrida).
     - cron: '17 9 * * 1'
-    # Google Maps no dia 2 de cada mês (teto de US$ 2,40).
-    - cron: '23 9 2 * *'
+    # Google Maps no dia 2 de cada mês, à tarde (teto de US$ 2,40), para nunca
+    # coincidir com a Sympla quando o dia 2 cai numa segunda.
+    - cron: '23 21 2 * *'
   workflow_dispatch:
     inputs:
       fonte:
@@ -38,10 +43,14 @@ jobs:
     steps:
       - name: Escolher a fonte
         id: fonte
+        env:
+          EVENTO: ${{ github.event_name }}
+          AGENDA: ${{ github.event.schedule }}
+          ESCOLHA: ${{ inputs.fonte }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "nome=${{ inputs.fonte }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "23 9 2 * *" ]; then
+          if [ "$EVENTO" = "workflow_dispatch" ]; then
+            echo "nome=$ESCOLHA" >> "$GITHUB_OUTPUT"
+          elif [ "$AGENDA" = "23 21 2 * *" ]; then
             echo "nome=google_maps" >> "$GITHUB_OUTPUT"
           else
             echo "nome=sympla" >> "$GITHUB_OUTPUT"

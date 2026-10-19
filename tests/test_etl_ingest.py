@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -208,6 +209,26 @@ def test_admin_ingest_does_not_guess_the_usage(configured: MagicMock) -> None:
 
     assert response.status_code == 503
     run.assert_not_awaited()
+
+
+def test_admin_ingest_logs_why_the_usage_could_not_be_read(
+    configured: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A revoked Apify token must leave a trace, not only "Tente de novo mais tarde".
+    refused = httpx.HTTPStatusError(
+        "401", request=httpx.Request("GET", "https://api.apify.com/v2/users/me/limits"), response=httpx.Response(401)
+    )
+
+    with (
+        patch("app.api.admin.start_run", AsyncMock()),
+        patch("app.api.admin.monthly_usage", AsyncMock(side_effect=refused)),
+        caplog.at_level(logging.WARNING, logger="app.api.admin"),
+    ):
+        response = TestClient(app).post("/admin/ingest", json={"source": "sympla"}, headers={"X-Admin-Token": ADMIN})
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "apify_usage_unavailable"
+    assert any("HTTPStatusError" in r.getMessage() and "401" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.parametrize(
