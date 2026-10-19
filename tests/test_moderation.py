@@ -99,6 +99,13 @@ def _says(flagged: dict[str, list[str]], *, images: Any = None) -> Any:
         ("81 99999\u22128888", ["telefone"]),
         ("2025-2026, 2025\u20132026, das 19:00 às 23:00, 18/10/2026, 2026-10-18", []),
         ("Senha 1234-5678, sala 9000-1000", []),
+        # Ranges with a spaced dash after a small number (#22 A review, round 3).
+        ("Copa Sub-17 2025 - 2026", []),
+        ("Baile de Formatura Turma 15 2020 - 2025", []),
+        ("Categorias\nSub 11\n2014 - 2015\nSub 13\n2012 - 2013", []),
+        ("Temporada 9 2025 - 2026", []),
+        ("Capacidade: 15 3000 - 4000 pessoas", []),
+        ("Anos 80 2000 - 2010", []),
         ("Ingresso R$ 1.234,56, dia 12/10/2026 às 19:30", []),
         ("CNPJ 12.345.678/0001-90, CEP 50030-230", []),
         ("Rua da Aurora, 1234, sala 3001", []),
@@ -202,12 +209,46 @@ async def test_private_photos_are_signed_for_two_minutes_only() -> None:
     images.assert_awaited_once_with(["https://signed/a"])
 
 
-async def test_a_photo_that_cannot_be_signed_is_not_let_through() -> None:
+async def test_a_photo_that_no_longer_exists_is_not_let_through() -> None:
+    # Storage leaves out what it cannot sign; retrying never helps.
     db = MagicMock()
     db.sign_media_paths = AsyncMock(return_value={})
 
+    assert await real_path_verdicts(db, ["user-1/a.jpg"]) == [Verdict(False, unreadable=True, missing=True)]
+
+
+async def test_a_storage_failure_while_signing_is_unavailable_and_recorded(recorded: list[dict[str, Any]]) -> None:
+    db = MagicMock()
+    db.sign_media_paths = AsyncMock(side_effect=httpx.ConnectError("storage down"))
+
     with pytest.raises(moderation.ModerationUnavailable):
         await real_path_verdicts(db, ["user-1/a.jpg"])
+
+    assert [r["code"] for r in recorded] == ["storage_sign_error"]
+
+
+@pytest.mark.parametrize(
+    ("media", "icon", "message"),
+    [
+        ([{"media_url": "user-1/sumiu.jpg", "type": "image"}], None, "Uma das fotos não está mais disponível. Remova e envie de novo."),
+        ([], "user-1/sumiu.png", "O ícone do troféu não está mais disponível. Escolha outro e tente de novo."),
+    ],
+)
+async def test_a_file_that_no_longer_exists_is_refused_saying_so(
+    monkeypatch: pytest.MonkeyPatch, media: list[dict[str, Any]], icon: str | None, message: str
+) -> None:
+    # Saving must be the way out for an event the pass hid for a missing photo.
+    monkeypatch.setattr(moderation, "path_verdicts", real_path_verdicts)
+    db = MagicMock()
+    db.sign_media_paths = AsyncMock(return_value={})
+    trophy = {"name": "Passista", "icon_url": icon} if icon else None
+
+    with pytest.raises(ApiError) as caught:
+        await check_event_content(db, _body(media=media, trophy=trophy))
+
+    assert caught.value.status_code == 422
+    assert caught.value.code == "content_blocked"
+    assert caught.value.message == message
 
 
 # --------------------------------------------------- created in the app --
@@ -534,16 +575,54 @@ async def test_a_moderation_that_times_out_on_its_own_is_recorded(
     assert [r["code"] for r in recorded] == ["moderation_api_error"]
 
 
-async def test_an_unreadable_cover_is_dropped_but_tried_again_next_time(monkeypatch: pytest.MonkeyPatch) -> None:
-    # OpenAI could not fetch it (a slow host, say): unlike a refused cover, it is not remembered.
+async def test_an_unreadable_cover_is_dropped_and_marked(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ai_service, "moderate_inputs", _says({}, images=_status_error(400)))
+    ev = _imported(1)
+    db = _etl_db()
+
+    await _load(db, [ev])
+
+    row = _rows(db)["s1"]
+    assert row["cover_url"] is None
+    assert row["moderation_dropped_cover"] == ev.cover_url
+    assert row["moderation_reasons"] == ["unreadable_cover"]
+
+
+@pytest.mark.parametrize(("days_ago", "checked_again"), [(1, False), (8, True)])
+async def test_an_unreadable_cover_is_tried_again_only_after_a_week(
+    monkeypatch: pytest.MonkeyPatch, days_ago: int, checked_again: bool
+) -> None:
+    # OpenAI could not fetch it (a slow host, say): not every import, but not never.
+    from datetime import datetime, timedelta, timezone
+
+    moderate = AsyncMock(side_effect=_says({}))
+    monkeypatch.setattr(ai_service, "moderate_inputs", moderate)
+    ev = _imported(1)
+    db = _etl_db(
+        {
+            "s1": {
+                "moderation_hash": event_moderation_hash(ev.title, ev.description, None),
+                "moderation_dropped_cover": ev.cover_url,
+                "moderation_reasons": ["unreadable_cover"],
+                "moderated_at": (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat(),
+            }
+        }
+    )
+
+    await _load(db, [ev])
+
+    assert moderate.await_count == (2 if checked_again else 0)
+    assert _rows(db)["s1"]["cover_url"] == (ev.cover_url if checked_again else None)
+
+
+async def test_a_refused_cover_keeps_its_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ai_service, "moderate_inputs", _says({}, images=(False, ["violence"])))
     db = _etl_db()
 
     await _load(db, [_imported(1)])
 
-    row = _rows(db)["s1"]
-    assert row["cover_url"] is None
-    assert row["moderation_dropped_cover"] is None
+    assert _rows(db)["s1"]["moderation_reasons"] == ["violence"]
+    assert _rows(db)["s1"]["moderation_blocked"] is False
 
 
 async def test_text_checks_run_side_by_side(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -652,7 +731,9 @@ async def test_the_import_reads_what_the_moderation_remembers() -> None:
     await DBService(client).list_source_state("sympla")
 
     select = client.get.await_args.kwargs["params"]["select"].split(",")
-    assert {"moderation_hash", "moderation_blocked", "moderation_dropped_cover"} <= set(select)
+    assert {"moderation_hash", "moderation_blocked", "moderation_dropped_cover", "moderation_reasons", "moderated_at"} <= set(
+        select
+    )
 
 
 async def test_the_import_removes_contacts_before_anything_is_stored() -> None:

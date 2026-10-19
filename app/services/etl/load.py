@@ -10,10 +10,10 @@ cannot be read, and a batch whose embeddings failed keeps the vectors it had.
 Moderation (#22 A): what is new or changed since it was last checked goes through
 the moderation first (``IMPORT_MODERATION_BUDGET_SECONDS``). Refused text never
 enters (a row that was already here is hidden); a refused or unreadable cover is
-dropped (a refused one is remembered, so it is not checked again; an unreadable one
-is tried again next time); what could not be
-checked in time waits for the next import (an existing row keeps its checked
-content). Unchanged rows are never checked again; hidden ones always are.
+dropped and remembered, so it is not checked again (an unreadable one only after
+``UNREADABLE_COVER_RETRY_DAYS``); what could not be checked in time waits for the
+next import (an existing row keeps its checked content). Unchanged rows are never
+checked again; hidden ones always are.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.core.config import settings
@@ -30,7 +30,13 @@ from app.services.db_service import DBService
 from app.services.etl.schemas import StandardizedEvent
 from app.services.etl.transform import normalize
 from app.services.event_keywords import raw_embedding_text, stored_keywords
-from app.services.moderation import check_imports, event_moderation_hash, import_text
+from app.services.moderation import (
+    UNREADABLE_COVER,
+    check_imports,
+    dropped_cover_reasons,
+    event_moderation_hash,
+    import_text,
+)
 from app.services.taste_agent import event_content_hash, event_embedding_text
 
 logger = logging.getLogger(__name__)
@@ -141,8 +147,21 @@ def _as_moderated(ev: StandardizedEvent, row: dict[str, Any] | None) -> Standard
         return ev
     dropped = row.get("moderation_dropped_cover")
     if dropped and ev.cover_url == dropped and stored == event_moderation_hash(ev.title, ev.description, None):
+        if UNREADABLE_COVER in (row.get("moderation_reasons") or []) and _retry_due(row.get("moderated_at")):
+            return None
         return ev.model_copy(update={"cover_url": None})
     return None
+
+
+def _retry_due(moderated_at: Any) -> bool:
+    """An unreadable cover is checked again once it was last tried long enough ago."""
+    try:
+        when = datetime.fromisoformat(str(moderated_at))
+    except ValueError:
+        return True
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - when >= timedelta(days=settings.UNREADABLE_COVER_RETRY_DAYS)
 
 
 async def upsert_events(
@@ -182,10 +201,11 @@ async def upsert_events(
             if key in stored and not stored[key].get("moderation_blocked"):
                 to_block.append((ev, list(check.categories)))
             continue
-        dropped = None
+        dropped, reasons = None, None
         if check.drop_cover and ev.cover_url:
-            # Only a refused cover is remembered; one that could not be read is tried again.
-            dropped = None if check.cover_unreadable else ev.cover_url
+            # Remembered, so the next import (which still brings it) does not check it
+            # again; one that could not be read is tried again after a while.
+            dropped, reasons = ev.cover_url, dropped_cover_reasons(check)
             ev = ev.model_copy(update={"cover_url": None})
             result.covers_removed += 1
         kept.append(
@@ -195,7 +215,7 @@ async def upsert_events(
                     "moderation_hash": event_moderation_hash(ev.title, ev.description, ev.cover_url),
                     "moderated_at": now,
                     "moderation_blocked": False,
-                    "moderation_reasons": None,
+                    "moderation_reasons": reasons,
                     "moderation_dropped_cover": dropped,
                 },
             )

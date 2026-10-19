@@ -1331,7 +1331,7 @@ class DBService:
                     "source": f"eq.{source}",
                     "select": (
                         "source_event_id,keywords,keywords_summary,keywords_hash,"
-                        "moderation_hash,moderation_blocked,moderation_dropped_cover"
+                        "moderation_hash,moderation_blocked,moderation_dropped_cover,moderation_reasons,moderated_at"
                     ),
                     "order": "id.asc",
                     "limit": str(page),

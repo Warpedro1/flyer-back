@@ -133,6 +133,9 @@ class Settings(BaseSettings):
     # Moderation of what an import brings new or changed (#22 A); what does not fit
     # waits for the next import or POST /admin/events/moderation.
     IMPORT_MODERATION_BUDGET_SECONDS: float = Field(default=15.0, ge=3.0, le=30.0)
+    # An imported cover the moderation could not read is dropped and checked again
+    # only after this many days (not on every import: it would use up the budget).
+    UNREADABLE_COVER_RETRY_DAYS: int = Field(default=7, ge=1, le=90)
     # "Melhorar descrição" (#22 C): free for everybody, 10 an hour per person
     # (decision 2026-10-18).
     DESCRIBE_MODEL: str = "gpt-4o-mini"
