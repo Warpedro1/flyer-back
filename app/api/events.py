@@ -21,6 +21,8 @@ from app.models.schemas import (
     DiscoverRequest,
     EventCapacityRead,
     EventCreate,
+    EventDescribeRead,
+    EventDescribeRequest,
     EventEditRead,
     EventMediaEdit,
     EventMediaRead,
@@ -36,7 +38,9 @@ from app.models.schemas import (
 from app.services.ai_service import ai_service
 from app.services.checkin_service import checkin_method
 from app.services.checkin_window import checkin_state
+from app.services.event_describe import describe_event
 from app.services.event_keywords import embed_app_events
+from app.services.moderation import check_event_content, event_moderation_hash
 from app.services.event_recurrence import expand_recurrence
 from app.services.interest_sync import parse_interest_embedding
 from app.services.onboarding_pipeline import ensure_interest_embedding
@@ -129,6 +133,7 @@ def _row_to_event_read(
         price_level=int(row["price_level"]) if row.get("price_level") is not None else None,
         source_url=row.get("source_url"),
         cover_url=row.get("cover_url"),
+        moderation_blocked=bool(row.get("moderation_blocked")),
     )
 
 
@@ -246,6 +251,12 @@ def _event_payload(body: _EventFields) -> dict[str, Any]:
         "waitlist_enabled": body.waitlist_enabled,
         "call_ttl_minutes": body.call_ttl_minutes,
         "auto_call_next": body.auto_call_next,
+        # Checked by `check_event_content` before this is written (#22 A); events
+        # created in the app have no cover, only their own media.
+        "moderation_hash": event_moderation_hash(body.title, body.description, None),
+        "moderated_at": datetime.now(timezone.utc).isoformat(),
+        "moderation_blocked": False,
+        "moderation_reasons": None,
     }
     return payload
 
@@ -271,6 +282,17 @@ async def _check_uploads_and_place(
         await require_place(db, body.place_id, jwt)
 
 
+@router.post("/describe", response_model=EventDescribeRead)
+@limiter.limit("10/hour")
+async def suggest_description(
+    request: Request,
+    body: EventDescribeRequest,
+    auth: Annotated[tuple[str, str], Depends(get_current_user_with_token)],
+) -> EventDescribeRead:
+    """ "Melhorar descrição" (#22 C): a suggestion from what the creator wrote, never saved."""
+    return EventDescribeRead(description=await describe_event(body))
+
+
 @router.post("/", response_model=EventRead, status_code=status.HTTP_201_CREATED)
 @limiter.limit("10/minute")
 async def create_event(
@@ -281,6 +303,8 @@ async def create_event(
 ) -> EventRead:
     user_id, jwt = auth
     await _check_uploads_and_place(db, body, user_id, jwt)
+    # Moderation and personal data (#22 A): refused before anything is written.
+    await check_event_content(db, body)
     base_payload = _event_payload(body)
     if body.place_id is None:
         del base_payload["place_id"]
@@ -408,7 +432,7 @@ async def list_place_events(
     """Upcoming events at a place (kind = place), soonest first."""
     _, jwt = auth
     place = await db.get_event_by_id(place_id, jwt)
-    if not place or place.get("kind") != "place":
+    if not place or place.get("kind") != "place" or place.get("moderation_blocked"):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lugar não encontrado.")
     rows = await db.list_place_events(place_id, jwt)
     if not rows:
@@ -471,7 +495,9 @@ async def get_event(
     """Return a single event by ID."""
     user_id, jwt = auth
     row = await db.get_event_by_id(event_id, jwt)
-    if not row:
+    # What the moderation refused is not shown, not even by its link (#22 A), except
+    # to its creator, who can fix it by editing.
+    if not row or (row.get("moderation_blocked") and str(row.get("creator_id")) != user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evento não encontrado.")
     media_map = await db.batch_fetch_event_media([event_id], jwt)
     media = media_map.get(event_id, [])
@@ -564,6 +590,7 @@ async def update_event(
     current = await require_event_creator(db, event_id, user_id, jwt)
     _editable(current)
     await _check_uploads_and_place(db, body, user_id, jwt)
+    await check_event_content(db, body)
 
     payload = {**_event_payload(body), **_schedule(body, body.event_date)}
     row = await db.update_event(event_id, user_id, payload)

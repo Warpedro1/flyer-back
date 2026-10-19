@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.core.limiter import limiter
 from app.main import app
 from app.services.etl.apify import fetch_dataset_items, start_run
+from app.services.etl.load import LoadResult
 from app.services.etl.pipeline import ingest_dataset
 from app.services.etl.schemas import IngestionReport
 from app.services.etl.sources import SOURCES
@@ -92,7 +93,7 @@ async def test_ingest_dataset_transforms_loads_and_links() -> None:
 
     with (
         patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=[good, bad])),
-        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=1)) as upsert,
+        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=LoadResult(upserted=1))) as upsert,
         patch("app.services.etl.pipeline.link_events_to_places", AsyncMock(return_value=0)) as link,
         patch("app.services.etl.pipeline.reprocess_stale", AsyncMock(return_value=ReprocessResult(0, 0, 0))),
     ):

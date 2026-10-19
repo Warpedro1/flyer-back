@@ -183,6 +183,7 @@ async def join_event(
     user_id, jwt = auth
     event = await db.get_event_by_id(event_id, jwt)
     if event:
+        _require_shown(event)
         require_not_place(event)
     try:
         row = await db.rsvp_join(event_id, user_id)
@@ -233,6 +234,12 @@ async def get_my_rsvp(
     return await _with_ahead_count(db, row, jwt)
 
 
+def _require_shown(event: dict[str, Any]) -> None:
+    """What the moderation hid (#22 A) takes no RSVP and gives no ticket."""
+    if event.get("moderation_blocked"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evento não encontrado.")
+
+
 def _ticket_unavailable() -> ApiError:
     return ApiError(
         409, "ticket_unavailable", "Este evento é só informativo: não tem ingresso nem check-in."
@@ -242,7 +249,9 @@ def _ticket_unavailable() -> ApiError:
 async def _issue_qr(
     db: DbServiceDep, event_id: str, user_id: str, jwt: str, position: AttendeePosition | None
 ) -> RsvpQrToken:
-    event = await db.get_event_by_id(event_id, jwt, select="id,kind,source")
+    event = await db.get_event_by_id(event_id, jwt, select="id,kind,source,moderation_blocked")
+    if event:
+        _require_shown(event)
     if event and checkin_method(event) != "qr":
         raise _ticket_unavailable()
     row = await db.get_rsvp(event_id, user_id, jwt)

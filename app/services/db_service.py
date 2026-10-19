@@ -665,11 +665,13 @@ class DBService:
             return data
         return []
 
-    async def sign_media_paths(self, paths: list[str]) -> dict[str, str]:
+    async def sign_media_paths(self, paths: list[str], *, ttl: int | None = None) -> dict[str, str]:
         """Map private Storage paths -> short-lived signed URLs (service_role).
 
         Values that are already absolute URLs (legacy `http(s)://` media) pass through
         unchanged. Paths that fail to sign are simply omitted (caller keeps the raw path).
+        ``ttl`` (seconds) overrides ``MEDIA_SIGNED_URL_TTL_SECONDS``, e.g. for a URL
+        that only the moderation reads.
         """
         out: dict[str, str] = {}
         to_sign: list[str] = []
@@ -685,7 +687,7 @@ class DBService:
 
         r = await self._client.post(
             f"{STORAGE_PREFIX}/object/sign/{settings.MEDIA_BUCKET}",
-            json={"expiresIn": settings.MEDIA_SIGNED_URL_TTL_SECONDS, "paths": to_sign},
+            json={"expiresIn": ttl or settings.MEDIA_SIGNED_URL_TTL_SECONDS, "paths": to_sign},
             headers=self._admin_headers(),
         )
         await self._raise_for_supabase(r)
@@ -1120,11 +1122,13 @@ class DBService:
         min_lng: float,
         max_lng: float,
     ) -> list[dict[str, Any]]:
-        """Places (kind = place) inside a lat/long box. ETL only: service_role."""
+        """Places (kind = place) inside a lat/long box, hidden ones aside (#22 A).
+        ETL only: service_role."""
         r = await self._client.get(
             f"{REST_PREFIX}/events",
             params=[
                 ("kind", "eq.place"),
+                ("moderation_blocked", "is.false"),
                 ("lat", f"gte.{min_lat}"),
                 ("lat", f"lte.{max_lat}"),
                 ("long", f"gte.{min_lng}"),
@@ -1299,6 +1303,8 @@ class DBService:
             f"{REST_PREFIX}/events",
             params={
                 "keywords_stale": "is.true",
+                # Hidden rows need no keywords (#22 A).
+                "moderation_blocked": "is.false",
                 "select": "id,kind,title,description,category",
                 "order": "id.asc",
                 "limit": str(limit),
@@ -1310,11 +1316,11 @@ class DBService:
         rows = r.json()
         return rows if isinstance(rows, list) else []
 
-    async def list_source_keywords(self, source: str) -> dict[str, dict[str, Any]]:
-        """Stored keywords of a source's imports, by ``source_event_id`` (ETL only).
+    async def list_source_state(self, source: str) -> dict[str, dict[str, Any]]:
+        """What a source's stored rows already have, by ``source_event_id`` (ETL only).
 
-        A re-import reuses them when the text did not change, so the vector stays made
-        from keywords without calling the LLM again.
+        A re-import reuses the keywords (#22 B) and skips the moderation (#22 A) of
+        the rows whose text did not change since.
         """
         out: dict[str, dict[str, Any]] = {}
         offset, page = 0, 1000
@@ -1323,8 +1329,10 @@ class DBService:
                 f"{REST_PREFIX}/events",
                 params={
                     "source": f"eq.{source}",
-                    "keywords_hash": "not.is.null",
-                    "select": "source_event_id,keywords,keywords_summary,keywords_hash",
+                    "select": (
+                        "source_event_id,keywords,keywords_summary,keywords_hash,"
+                        "moderation_hash,moderation_blocked,moderation_dropped_cover,moderation_reasons,moderated_at"
+                    ),
                     "order": "id.asc",
                     "limit": str(page),
                     "offset": str(offset),
@@ -1341,6 +1349,49 @@ class DBService:
                 break
             offset += page
         return out
+
+    async def block_imported_event(self, source: str, source_event_id: str, reasons: list[str]) -> None:
+        """Hide an imported row whose new content the moderation refused (#22 A)."""
+        r = await self._client.patch(
+            f"{REST_PREFIX}/events",
+            params={"source": f"eq.{source}", "source_event_id": f"eq.{source_event_id}"},
+            json={
+                "moderation_blocked": True,
+                "moderation_reasons": reasons,
+                "moderated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+
+    async def list_stale_moderation_events(self, *, limit: int, offset: int = 0) -> list[dict[str, Any]]:
+        """Rows whose current content the moderation has not checked (generated
+        column ``moderation_stale``), hidden ones aside."""
+        r = await self._client.get(
+            f"{REST_PREFIX}/events",
+            params={
+                "moderation_stale": "is.true",
+                "moderation_blocked": "is.false",
+                "select": "id,source,kind,title,description,location_name,cover_url",
+                "order": "id.asc",
+                "limit": str(limit),
+                "offset": str(offset),
+            },
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        return rows if isinstance(rows, list) else []
+
+    async def set_event_moderation(self, event_id: str, fields: dict[str, Any]) -> None:
+        """The moderation pass's result for one row (and its redacted text)."""
+        r = await self._client.patch(
+            f"{REST_PREFIX}/events",
+            params={"id": f"eq.{event_id}"},
+            json=fields,
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
 
     async def get_event_by_id(
         self,
@@ -1374,6 +1425,7 @@ class DBService:
             params={
                 "place_id": f"eq.{place_id}",
                 "event_date": f"gte.{datetime.now(timezone.utc).isoformat()}",
+                "moderation_blocked": "is.false",
                 "select": "*",
                 "order": "event_date.asc",
                 "limit": str(limit),
@@ -1444,6 +1496,8 @@ class DBService:
             "status": "in.(confirmed,waitlisted,called,admitted)",
             "select": "status,waitlist_position,events!inner(*)",
             "events.kind": "eq.event",
+            # What the moderation hid is not listed (#22 A).
+            "events.moderation_blocked": "is.false",
             "limit": str(limit),
         }
         direction = "asc"

@@ -50,7 +50,7 @@ def _place(**overrides: Any) -> StandardizedEvent:
 def _db(stored: dict[str, dict[str, Any]] | None = None) -> MagicMock:
     db = MagicMock()
     db.upsert_events = AsyncMock(side_effect=lambda rows: len(rows))
-    db.list_source_keywords = AsyncMock(return_value=stored or {})
+    db.list_source_state = AsyncMock(return_value=stored or {})
     return db
 
 
@@ -59,7 +59,7 @@ async def test_embeddings_are_requested_in_batches_not_one_per_item() -> None:
     embed = AsyncMock(side_effect=lambda texts: [VEC] * len(texts))
 
     with patch("app.services.etl.load.ai_service.generate_embeddings", embed):
-        count = await upsert_events(db, [_event(n) for n in range(250)])
+        count = (await upsert_events(db, [_event(n) for n in range(250)])).upserted
 
     assert count == 250
     assert [len(c.args[0]) for c in embed.await_args_list] == [100, 100, 50]
@@ -102,7 +102,7 @@ async def test_a_failed_embedding_still_imports_the_items(caplog: pytest.LogCapt
         patch("app.services.etl.load.ai_service.generate_embeddings", failing),
         caplog.at_level(logging.ERROR, logger="app.services.etl.load"),
     ):
-        count = await upsert_events(db, [_event(1)])
+        count = (await upsert_events(db, [_event(1)])).upserted
 
     assert count == 1
     # No new vector: the row keeps the one it had (fresh keywords stay consistent).

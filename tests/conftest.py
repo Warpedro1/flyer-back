@@ -60,3 +60,26 @@ def _no_real_llm(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.services import taste_agent
 
     monkeypatch.setattr(taste_agent, "_structured", lambda *_, **__: _OffRunnable())
+
+
+@pytest.fixture(autouse=True)
+def _moderation_allows_everything(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never reach OpenAI's moderation: every input is allowed unless a test
+    sets `ai_service.moderate_inputs` itself, and the private photos of an event are
+    not signed (`moderation.path_verdicts`). The real method stays reachable as
+    `AIService.moderate_inputs`."""
+    from app.services import moderation
+    from app.services.ai_service import ai_service
+
+    async def allow(inputs: Any) -> list[tuple[bool, list[str]]]:
+        return [(True, [])] * len(inputs)
+
+    async def paths(_db: Any, items: Any, **_: Any) -> list[Any]:
+        return [moderation.Verdict(True)] * len(items)
+
+    async def no_completion(*_: Any, **__: Any) -> str:
+        raise LLMOffInTests("completions are off in tests")
+
+    monkeypatch.setattr(ai_service, "moderate_inputs", allow)
+    monkeypatch.setattr(moderation, "path_verdicts", paths)
+    monkeypatch.setattr(ai_service, "complete", no_completion)

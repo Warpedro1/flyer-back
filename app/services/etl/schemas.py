@@ -53,4 +53,10 @@ class IngestionReport(BaseModel):
     linked: int = 0
     # Rows given keywords and a new vector in this run (#22 B).
     keywords: int = 0
+    # Moderation (#22 A): refused (never entered, or hidden), not checked in time,
+    # covers dropped, and items whose contacts became "[contato removido]".
+    blocked: int = 0
+    moderation_pending: int = 0
+    covers_removed: int = 0
+    contacts_removed: int = 0
     errors: list[str] = Field(default_factory=list)

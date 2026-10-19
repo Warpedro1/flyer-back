@@ -27,7 +27,7 @@ from app.main import app
 from app.services import event_keywords, taste_agent
 from app.services.db_service import DBService
 from app.services.etl import pipeline
-from app.services.etl.load import upsert_events
+from app.services.etl.load import LoadResult, upsert_events
 from app.services.etl.schemas import StandardizedEvent
 from app.services.etl.sources import SOURCES
 from app.services.event_keywords import (
@@ -311,7 +311,7 @@ async def test_a_reimport_reuses_fresh_keywords_and_leaves_the_rest_raw() -> Non
     }
     db = MagicMock()
     db.upsert_events = AsyncMock(side_effect=lambda rows: len(rows))
-    db.list_source_keywords = AsyncMock(return_value=stored)
+    db.list_source_state = AsyncMock(return_value=stored)
     embed = AsyncMock(side_effect=lambda texts: [VEC] * len(texts))
 
     with patch("app.services.etl.load.ai_service.generate_embeddings", embed):
@@ -320,7 +320,7 @@ async def test_a_reimport_reuses_fresh_keywords_and_leaves_the_rest_raw() -> Non
     texts = embed.await_args.args[0]
     assert texts[0] == "Show 1\nCategoria: Música/Show\nPalavras-chave: samba.\nResumo: Roda."
     assert texts[1] == "Show 2 Texto novo musica_show"
-    db.list_source_keywords.assert_awaited_once_with("sympla")
+    db.list_source_state.assert_awaited_once_with("sympla")
     # The upsert never carries the keyword columns: a re-import cannot wipe them.
     assert not any(k.startswith("keywords") for k in db.upsert_events.await_args.args[0][0])
 
@@ -330,7 +330,7 @@ async def test_without_the_stored_keywords_the_load_stops_before_overwriting() -
     # never sees (they are not stale).
     db = MagicMock()
     db.upsert_events = AsyncMock(side_effect=lambda rows: len(rows))
-    db.list_source_keywords = AsyncMock(side_effect=RuntimeError("supabase down"))
+    db.list_source_state = AsyncMock(side_effect=RuntimeError("supabase down"))
 
     with (
         patch("app.services.etl.load.ai_service.generate_embeddings", AsyncMock(return_value=[VEC])),
@@ -348,7 +348,7 @@ async def test_the_webhook_gives_keywords_with_the_time_left(monkeypatch: pytest
 
     with (
         patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=raw)),
-        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=1)),
+        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=LoadResult(upserted=1))),
         patch("app.services.etl.pipeline.link_events_to_places", AsyncMock(return_value=0)),
         patch("app.services.etl.pipeline.reprocess_stale", done),
     ):
@@ -367,7 +367,7 @@ async def test_the_webhook_spends_nothing_on_keywords_until_the_owner_approves()
 
     with (
         patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=[])),
-        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=0)),
+        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=LoadResult())),
         patch("app.services.etl.pipeline.link_events_to_places", AsyncMock(return_value=0)),
         patch("app.services.etl.pipeline.reprocess_stale", done),
     ):
@@ -383,7 +383,7 @@ async def test_a_slow_load_leaves_the_keywords_for_later(monkeypatch: pytest.Mon
 
     with (
         patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=[])),
-        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=0)),
+        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=LoadResult())),
         patch("app.services.etl.pipeline.link_events_to_places", AsyncMock(return_value=0)),
         patch("app.services.etl.pipeline.reprocess_stale", done),
     ):
@@ -438,7 +438,7 @@ async def test_the_stored_keywords_of_a_source_are_read_page_by_page() -> None:
         ]
     )
 
-    stored = await DBService(client).list_source_keywords("google_maps")
+    stored = await DBService(client).list_source_state("google_maps")
 
     assert len(stored) == 1001
     assert [c.kwargs["params"]["offset"] for c in client.get.await_args_list] == ["0", "1000"]
