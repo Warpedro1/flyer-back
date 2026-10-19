@@ -594,9 +594,10 @@ class DBService:
         """Event and place ids within the radius, best match first (max 200, no past events).
 
         ``query_embedding=None`` is the fallback for users without an interest
-        vector: the same nearby items, what pleases most people first (events of
-        broad appeal, each group by date, then the most reviewed places; migration
-        ``place_popularity``). Filters left as None are not
+        vector: the same nearby items, what pleases most people first (shows,
+        parties, festivals and theatre, then the other events, each group by date,
+        then the most reviewed places; migration ``place_popularity``). Filters left
+        as None are not
         sent and the function's defaults (no filter) apply. See the
         ``places_catalog`` migration for how places meet the date and price filters.
         """

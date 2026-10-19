@@ -82,7 +82,11 @@ def sympla_item(**overrides: Any) -> dict[str, Any]:
 
 def test_every_search_maps_to_a_known_category() -> None:
     assert {s.category for s in PLACE_SEARCHES} <= set(EVENT_CATEGORIES)
-    assert BROAD_APPEAL_CATEGORIES <= set(EVENT_CATEGORIES)
+
+
+def test_the_events_that_go_first_are_the_owners() -> None:
+    # Decision 2026-10-19: shows, parties, festivals and theatre go first.
+    assert BROAD_APPEAL_CATEGORIES == {"musica_show", "vida_noturna", "teatro_cinema"}
 
 
 def test_no_search_is_the_start_of_another() -> None:
@@ -90,6 +94,22 @@ def test_no_search_is_the_start_of_another() -> None:
     terms = [s.term for s in PLACE_SEARCHES]
     assert len(set(terms)) == len(terms)
     assert not [(a, b) for a in terms for b in terms if a != b and b.startswith(a + " ")]
+
+
+@pytest.mark.parametrize(
+    ("category_name", "expected"),
+    [
+        # "pontos turísticos" also finds the city's museums, parks and theatres: their
+        # own kind decides, so the order Apify outputs the searches in does not.
+        ("Museu", "arte_cultura"),
+        ("Parque", "praia_natureza"),
+        ("Teatro", "teatro_cinema"),
+        ("Ponto de referência histórico", "turismo_passeio"),
+        (None, "turismo_passeio"),
+    ],
+)
+def test_the_generic_search_defers_to_googles_own_category(category_name: str | None, expected: str) -> None:
+    assert google_category("pontos turísticos em Recife", category_name) == expected
 
 
 @pytest.mark.parametrize(

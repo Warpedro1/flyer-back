@@ -204,6 +204,23 @@ async def test_without_review_counts_the_import_warns_and_goes_on() -> None:
     assert record.await_args.kwargs["code"] == "etl_popularity_signal_missing"
 
 
+@pytest.mark.parametrize("generic_first", [True, False])
+async def test_a_place_found_by_two_searches_gets_the_same_category_in_any_order(generic_first: bool) -> None:
+    museum = {**_place_item("paco", 5000, search="museus em Recife"), "categoryName": "Museu"}
+    landmark = {**_place_item("paco", 5000, search="pontos turísticos em Recife"), "categoryName": "Museu"}
+    raw = [landmark, museum] if generic_first else [museum, landmark]
+
+    with (
+        patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=raw)),
+        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=LoadResult(upserted=1))) as upsert,
+        patch("app.services.etl.pipeline.link_events_to_places", AsyncMock(return_value=0)),
+        patch("app.services.etl.pipeline.reprocess_stale", AsyncMock(return_value=ReprocessResult(0, 0, 0))),
+    ):
+        await ingest_dataset(MagicMock(), MagicMock(), SOURCES["google_maps"], "ds-1", "tok")
+
+    assert [e.category for e in upsert.await_args.args[1]] == ["arte_cultura"]
+
+
 async def test_ingest_dataset_counts_the_places_left_out() -> None:
     raw = [_place_item("quiet", 40), _place_item("quiet", 40, search="pontos turísticos em Recife"), _place_item("big", 3000)]
 
@@ -235,18 +252,20 @@ async def test_sympla_events_of_broad_appeal_go_first_each_by_date() -> None:
         item("show", "festas-e-shows", 9),
         item("play", "teatro-stand-up-e-danca", 3),
         item("course", "cursos-e-workshops", 2),
+        # Tours are not among what the owner put first (shows, parties, festivals, theatre).
+        item("tour", "passeios-e-tours", 4),
     ]
 
     with (
         patch("app.services.etl.pipeline.fetch_dataset_items", AsyncMock(return_value=raw)),
-        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=LoadResult(upserted=4))) as upsert,
+        patch("app.services.etl.pipeline.upsert_events", AsyncMock(return_value=LoadResult(upserted=5))) as upsert,
         patch("app.services.etl.pipeline.link_events_to_places", AsyncMock(return_value=0)),
         patch("app.services.etl.pipeline.reprocess_stale", AsyncMock(return_value=ReprocessResult(0, 0, 0))),
     ):
         report = await ingest_dataset(MagicMock(), MagicMock(), SOURCES["sympla"], "ds-1", "tok")
 
     # Exclude nothing (decision 2026-10-19): only the order changes.
-    assert [e.source_event_id for e in upsert.await_args.args[1]] == ["play", "show", "congress", "course"]
+    assert [e.source_event_id for e in upsert.await_args.args[1]] == ["play", "show", "congress", "course", "tour"]
     assert report.not_popular == 0
 
 

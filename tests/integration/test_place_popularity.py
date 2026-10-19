@@ -119,15 +119,21 @@ def _previous_function(conn: Any) -> None:
     conn.execute(sql[start:end].replace("public.match_events(", "public.match_events_before(", 1))
 
 
-def _mixed_catalogue(conn: Any) -> None:
+def _mixed_catalogue(conn: Any, rows: int = 60) -> None:
     rng = random.Random(20261019)
     vectors = [_unit(0), _unit(1), _unit(2), None]
     categories = ["musica_show", "tecnologia_negocios", "praia_natureza", "jogos", None]
-    for _ in range(60):
+    start = datetime(2099, 1, 1, tzinfo=timezone.utc)
+    for _ in range(rows):
         kind = rng.choice(["event", "place"])
+        when = None if kind == "place" else start + timedelta(days=rng.choice([1, 1, 5]))
+        ended = kind == "event" and rng.random() < 0.15
+        if ended:
+            when = datetime.now(timezone.utc) - timedelta(days=2)
         conn.execute(
-            "insert into public.events (kind, category, lat, long, event_date, reviews_count, rating, price, event_embedding) "
-            "values (%s, %s, %s, %s, %s, %s, %s, %s, %s::extensions.vector)",
+            "insert into public.events (kind, category, lat, long, event_date, ends_at, reviews_count, rating, price, "
+            "moderation_blocked, event_embedding) "
+            "values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::extensions.vector)",
             (
                 kind,
                 rng.choice(categories),
@@ -135,10 +141,12 @@ def _mixed_catalogue(conn: Any) -> None:
                 # some rows lie east of the radius, inside the latitude box.
                 LAT,
                 LNG + rng.choice([0.0, 1.0, 1.0, 4.0, 15.0]) * KM_EAST,
-                None if kind == "place" else datetime(2099, 1, 1, tzinfo=timezone.utc) + timedelta(days=rng.choice([1, 1, 5])),
+                when,
+                when + timedelta(hours=1) if ended and when else None,
                 rng.choice([None, 50, 50, 3000]) if kind == "place" else None,
                 rng.choice([None, "4.20", "4.80"]),
                 rng.choice([None, 0, 40]),
+                rng.random() < 0.1,
                 rng.choice(vectors),
             ),
         )
@@ -151,11 +159,14 @@ def _mixed_catalogue(conn: Any) -> None:
         {"kinds": ["place"]},
         {"categories": ["musica_show", "praia_natureza"]},
         {"max_price": 10},
+        {"date_from": datetime(2099, 1, 3, tzinfo=timezone.utc)},
+        {"date_to": datetime(2099, 1, 3, tzinfo=timezone.utc)},
     ],
 )
 def test_with_a_profile_the_order_is_exactly_the_previous_one(pdb: Any, filters: dict[str, Any]) -> None:
     _previous_function(pdb)
-    _mixed_catalogue(pdb)
+    # More rows than the 200 cap: the same order must also cut at the same row.
+    _mixed_catalogue(pdb, rows=320)
     args = ", ".join(f"{name} => %({name})s" for name in filters)
     tail = f", {args}" if args else ""
 
@@ -167,16 +178,31 @@ def test_with_a_profile_the_order_is_exactly_the_previous_one(pdb: Any, filters:
 
         assert after == before
         assert before
+    full = pdb.execute(
+        "select count(*) from public.match_events_before(%s::extensions.vector, %s, %s, 10.0)", (_unit(0), LAT, LNG)
+    ).fetchone()[0]
+    assert full == 200
 
 
 def test_without_a_profile_the_same_rows_come_only_in_another_order(pdb: Any) -> None:
     _previous_function(pdb)
+    # Under the 200 cap, where the two orders keep the same rows.
     _mixed_catalogue(pdb)
 
     before = pdb.execute("select id from public.match_events_before(null, %s, %s, 10.0)", (LAT, LNG)).fetchall()
     after = pdb.execute("select id from public.match_events(null, %s, %s, 10.0)", (LAT, LNG)).fetchall()
 
     assert sorted(after) == sorted(before)
+    assert len(before) < 200
+
+
+def test_without_a_profile_events_without_a_category_go_with_the_others_by_date(pdb: Any) -> None:
+    talk = _row(pdb, category="palestra_conhecimento", days=1)
+    unknown = _row(pdb, category=None, days=2)
+    course = _row(pdb, category="cursos_oficinas", days=3)
+    show = _row(pdb, category="musica_show", days=4)
+
+    assert _match(pdb, None) == [show, talk, unknown, course]
 
 
 def test_reviews_count_cannot_be_negative(pdb: Any) -> None:

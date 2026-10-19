@@ -19,7 +19,8 @@ class PlaceSearch:
     """One Google Maps search: what it looks for and the category it gives.
 
     The search that found a place decides its category: it was chosen for that
-    category. ``tier`` sets how popular a place must be to come in (see
+    category (a ``generic`` one only when Google's own category says nothing).
+    ``tier`` sets how popular a place must be to come in (see
     `transform.popular_place`); ``per_area`` searches each area of `sources.AREAS`
     instead of the whole city.
     """
@@ -28,13 +29,16 @@ class PlaceSearch:
     category: EventCategory
     tier: PlaceTier
     per_area: bool = False
+    # A search that also finds places of other kinds (museums, parks, theatres…):
+    # Google's own category decides those, so the order of the searches does not.
+    generic: bool = False
 
 
 # What pleases most people first (decision 2026-10-19): the city's icons and broad
 # leisure for the whole city, food and drink in each area, and the niches, which
 # still come, for the whole city only and with a lower bar.
 PLACE_SEARCHES: tuple[PlaceSearch, ...] = (
-    PlaceSearch("pontos turísticos", "turismo_passeio", "broad"),
+    PlaceSearch("pontos turísticos", "turismo_passeio", "broad", generic=True),
     PlaceSearch("parques", "praia_natureza", "broad"),
     PlaceSearch("praias", "praia_natureza", "broad"),
     PlaceSearch("museus", "arte_cultura", "broad"),
@@ -56,24 +60,12 @@ PLACE_SEARCHES: tuple[PlaceSearch, ...] = (
     PlaceSearch("jogos de tabuleiro", "jogos", "niche"),
 )
 
-# Categories of events most people enjoy (the owner: shows, parties, festivals and
-# theatre go first). Their events come first in the import (so the moderation budget
-# reaches them first) and, without a profile, in discovery:
-# `match_events` repeats this list (migration 20261019000000), and a test keeps the
-# two the same.
-BROAD_APPEAL_CATEGORIES: frozenset[EventCategory] = frozenset(
-    {
-        "comida_bebida",
-        "vida_noturna",
-        "musica_show",
-        "arte_cultura",
-        "teatro_cinema",
-        "praia_natureza",
-        "turismo_passeio",
-        "feira_mercado",
-        "familia_criancas",
-    }
-)
+# The events that go first (decision 2026-10-19: shows, parties, festivals and
+# theatre; Sympla's festivals come as "festas e shows"). They come first in the
+# import (so the moderation budget reaches them first) and, without a profile, in
+# discovery: `match_events` repeats this list (migration 20261019000000), and a test
+# keeps the two the same.
+BROAD_APPEAL_CATEGORIES: frozenset[EventCategory] = frozenset({"musica_show", "vida_noturna", "teatro_cinema"})
 
 # Keywords in Google's `categoryName` (lowercase, no accents), matched as whole words
 # (an optional plural "s" allowed): "bar" must not match "barbearia". First match

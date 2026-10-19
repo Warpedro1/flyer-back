@@ -119,11 +119,16 @@ def place_search(search: str | None) -> PlaceSearch | None:
 
 
 def google_category(search: str | None, category_name: str | None) -> EventCategory:
-    """The search that found the place, else Google's own category, else `outros`."""
+    """The search that found the place, else Google's own category, else `outros`.
+
+    A generic search ("pontos turísticos") yields to Google's own category: a museum
+    it found is still a museum, whichever of the two searches Apify output first.
+    """
     found = place_search(search)
-    if found:
+    own = _first_keyword(normalize(category_name), GOOGLE_KEYWORDS)
+    if found and not (found.generic and own):
         return found.category
-    return _first_keyword(normalize(category_name), GOOGLE_KEYWORDS) or "outros"
+    return own or "outros"
 
 
 def sympla_category(fmt: str | None, category: str | None) -> EventCategory:

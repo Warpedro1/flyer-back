@@ -16,8 +16,9 @@ comment on column public.events.reviews_count is
   'Quantas avaliações o lugar tem no Google (a popularidade usada na importação e na descoberta sem perfil).';
 
 -- Same signature, filters and body as in 20261018030000_event_moderation; only the
--- order without a query vector changes. The categories of broad appeal are
--- `taxonomy.BROAD_APPEAL_CATEGORIES` (a test keeps the two lists the same).
+-- order without a query vector changes. The categories of the events that go first
+-- (shows, parties, festivals and theatre) are `taxonomy.BROAD_APPEAL_CATEGORIES` (a
+-- test keeps the two lists the same).
 create or replace function public.match_events(
   query_embedding extensions.vector(1536),
   user_lat double precision,
@@ -67,10 +68,10 @@ as $fn$
    order by
      (query_embedding is not null and n.event_embedding is null),
      case when query_embedding is not null then n.event_embedding <=> query_embedding end,
-     -- Without a profile: events of broad appeal first (places sort after every event).
+     -- Without a profile: shows, parties, festivals and theatre first (places sort
+     -- after every event).
      case when query_embedding is null and n.kind = 'event' then not coalesce(n.category = any (array[
-       'comida_bebida', 'vida_noturna', 'musica_show', 'arte_cultura', 'teatro_cinema',
-       'praia_natureza', 'turismo_passeio', 'feira_mercado', 'familia_criancas'
+       'musica_show', 'vida_noturna', 'teatro_cinema'
      ]::text[]), false) end,
      n.event_date asc nulls last,
      -- Without a profile: the most reviewed places first, then the better rated.
