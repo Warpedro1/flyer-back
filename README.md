@@ -1,6 +1,36 @@
-# FlyerBack
+# Flyer — event discovery with an AI taste agent
 
-Backend API for Flyer, built with FastAPI and integrated with Supabase, OpenAI, and Pusher.
+**[Live app](https://flyer-inky.vercel.app)** · Backend (this repo) · [Frontend](https://github.com/Warpedro1/flyer)
+
+Flyer helps people find local events that match what they actually like, join them, and check in at the door. A short chat onboarding captures each person's tastes; an LLM turns that free text — and every event description — into the same pt-BR keyword space, and pgvector similarity does the matching.
+
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white) ![Supabase](https://img.shields.io/badge/Supabase-Postgres%20%2B%20pgvector-3FCF8E?logo=supabase&logoColor=white) ![OpenAI](https://img.shields.io/badge/OpenAI-gpt--4o-412991?logo=openai&logoColor=white) ![Vercel](https://img.shields.io/badge/Deploy-Vercel-000?logo=vercel) ![tests](https://img.shields.io/badge/tests-669%20pytest-brightgreen)
+
+## Architecture
+
+```mermaid
+flowchart LR
+  U[React app] -->|JWT Supabase Auth| API[FastAPI on Vercel]
+  API --> SVC[services layer]
+  SVC -->|httpx / PostgREST| DB[(Supabase Postgres<br/>pgvector · RLS)]
+  SVC -->|taste agent| LLM[OpenAI chat + embeddings]
+  SVC -->|traces| LS[LangSmith]
+  API -->|rate limit| R[(Upstash Redis)]
+  ETL[Apify catalog ETL] --> DB
+```
+
+## Highlights
+
+- **Taste agent** — one *analyst* call per onboarding answer (run concurrently) plus a *synthesizer* that merges them into 15–30 keywords; events get 8–15. Vectors are built from keywords only, so people and events are compared in the same terms, and stored keywords explain every recommendation. A failed or slow call never fails the request: there is a deterministic fallback at each stage.
+- **Events & RSVP** — capacity with waitlist, "call next / skip", JWT-signed QR tickets where scanning *is* the check-in, recurrence and check-in windows.
+- **Security by default** — Postgres RLS, security-definer functions revoked from client roles, service-role key only on the server, rate limiting, PII scrubbing in logs, content moderation.
+- **Thin routes, strict layering** — `api/` → `services/` → Supabase over REST with a single shared `httpx.AsyncClient` (no ORM); Pydantic v2 schemas; 21 SQL migrations.
+- **Shipped under constraints** — production dependencies trimmed from 255 MB to 123 MB to fit Vercel's serverless limit; catalog import kept within a US$ 5/month scraping budget.
+- **Tested** — 669 pytest tests, including guards that keep every user-facing string in pt-BR.
+
+---
+
+# Development guide
 
 ## Tech stack
 
