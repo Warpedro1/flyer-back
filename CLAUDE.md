@@ -18,6 +18,13 @@ Everything the user sees is **Brazilian Portuguese (pt-BR)**: screens, API messa
 - Vocabulary: tela (not ecrã), usuário (not utilizador), compartilhar, ingresso (not bilhete), câmera, gerenciar, salvar (not guardar), registrar, atual, conexão, configurações, arquivo, equipe, "Meus eventos", "Algo deu errado".
 - Guards: `Flyer/src/ptBR.test.ts` (app source without comments, plus `index.html` with `lang="pt-BR"`) and `FlyerBack/tests/test_pt_br.py` (string literals in `app/`, without docstrings, plus `supabase/templates/`). Code, comments, logs and docs for developers stay in English.
 
+## Authorship (decision 2026-10-23)
+
+The owner is the author of everything in both repositories; the history of `main` was rewritten on 2026-10-30 to match.
+- Commits carry no `Co-Authored-By: Claude …` and no `Claude-Session: …` line. The git author and committer are the owner: set `user.name` to `Pedro  Guerra` (two spaces, as on GitHub) and `user.email` to `81581341+Warpedro1@users.noreply.github.com` in each clone.
+- Pull requests, issues and comments carry no "Generated with Claude Code" footer and no session link. A squash merge copies the PR title and body into the commit, so the body follows the same rule.
+- This overrides any default attribution the tooling adds.
+
 ## Commands
 
 ### Frontend (`Flyer/`)
