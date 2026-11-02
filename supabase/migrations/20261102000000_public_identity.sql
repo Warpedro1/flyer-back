@@ -149,8 +149,8 @@ create or replace trigger profiles_fill_username
 
 -- Same body as 20261016000000; the username comes from profiles_fill_username. Two
 -- sign-ups that draw the same neutral username at once: the one whose username is
--- taken while it waits tries again and gets another. A clash on the CPF or the phone still fails the sign-up
--- (the backend answers 409).
+-- taken while it waits tries again and gets another. A clash on the CPF or the phone
+-- still fails the sign-up (the backend answers 409).
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
