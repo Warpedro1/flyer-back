@@ -544,6 +544,29 @@ def test_a_photo_cannot_be_saved_while_the_moderation_is_down(db: MagicMock) -> 
 
     assert response.status_code == 503
     db.update_own_profile.assert_not_awaited()
+    # The upload is not used: it goes, like a refused one.
+    db.delete_storage_objects.assert_awaited_once_with("avatars", [PHOTO])
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        AsyncMock(side_effect=moderation.ModerationUnavailable()),
+        AsyncMock(return_value=[moderation.Verdict(False, ("sexual",))]),
+        AsyncMock(return_value=[moderation.Verdict(True)]),
+    ],
+)
+def test_sending_the_current_photo_again_never_deletes_it(db: MagicMock, outcome: AsyncMock) -> None:
+    db.get_my_profile.return_value = {**PROFILE, "avatar_path": PHOTO}
+
+    with patch.object(moderation, "path_verdicts", outcome):
+        response = _client().put("/auth/profile/avatar", json={"path": PHOTO}, headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.json() == {"avatar_url": f"https://storage.example/{PHOTO}?token=t"}
+    db.delete_storage_objects.assert_not_awaited()
+    db.update_own_profile.assert_not_awaited()
+    outcome.assert_not_awaited()
 
 
 def test_a_failed_deletion_never_fails_the_request(db: MagicMock) -> None:

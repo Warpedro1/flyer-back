@@ -115,8 +115,8 @@ NEUTRAL_USERNAME = re.compile(r"usuario\d{6}")
 
 USERNAME_TAKEN_MESSAGE = _TAKEN["username"] + " Escolha outro."
 USERNAME_RULE_MESSAGE = (
-    "Use de 3 a 20 letras minúsculas sem acento, números (até 7 no total), ponto ou _, com "
-    "pelo menos uma letra e sem ponto no começo, no fim ou repetido."
+    "Use de 3 a 20 caracteres: letras minúsculas sem acento, números (até 7 no total), "
+    "ponto ou _, com pelo menos uma letra e sem ponto no começo, no fim ou repetido."
 )
 
 
@@ -556,11 +556,23 @@ async def change_phone(request: Request, body: PhoneIn, user_id: MyAccountDep, d
 @limiter.limit("10/hour")
 async def change_avatar(request: Request, body: AvatarIn, user_id: MyAccountDep, db: DbServiceDep) -> AvatarRead:
     """Use a photo the app uploaded to the person's own folder: moderated first; a
-    refused one is deleted, and the photo it replaces too."""
+    refused one (or one the moderation could not check) is deleted, and the photo it
+    replaces too."""
     require_avatar_path(user_id, body.path)
+    current = await db.get_my_profile(user_id)
+    if not current:
+        await discard_avatars(db, [body.path])
+        raise session_invalid()
+    previous = current.get("avatar_path")
+    if body.path == previous:
+        # Already the photo, and already moderated: nothing to do, and every deletion
+        # below is then of an upload that is not in use.
+        avatars = await sign_avatars(db, [previous])
+        return AvatarRead(avatar_url=avatars.get(previous))
     try:
         [verdict] = await moderation.path_verdicts(db, [body.path], bucket=settings.AVATAR_BUCKET)
     except ModerationUnavailable:
+        await discard_avatars(db, [body.path])
         raise ApiError(503, MODERATION_UNAVAILABLE, MODERATION_UNAVAILABLE_MESSAGE) from None
     if verdict.missing:
         raise ApiError(422, CONTENT_BLOCKED, "A foto não está mais disponível. Envie de novo.")
@@ -573,14 +585,8 @@ async def change_avatar(request: Request, body: AvatarIn, user_id: MyAccountDep,
             CONTENT_BLOCKED,
             f"A foto foi recusada pela moderação ({reasons(verdict.categories)}). Escolha outra.",
         )
-    current = await db.get_my_profile(user_id)
-    if not current:
-        await discard_avatars(db, [body.path])
-        raise session_invalid()
-    previous = current.get("avatar_path")
     await _update_own(db, user_id, {"avatar_path": body.path})
-    if previous != body.path:
-        await discard_avatars(db, [previous])
+    await discard_avatars(db, [previous])
     avatars = await sign_avatars(db, [body.path])
     return AvatarRead(avatar_url=avatars.get(body.path))
 
