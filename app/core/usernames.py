@@ -43,6 +43,10 @@ NICKNAME_MAX_LENGTH = 40
 _FORMAT = re.compile(r"[a-z0-9_][a-z0-9._]{1,18}[a-z0-9_]")
 _PIECES = re.compile(r"[._0-9]+")
 _WORDS = re.compile(r"[^a-z]+")
+# Eight digits in a row could be a phone or a CPF.
+_LONG_NUMBER = re.compile(r"[0-9]{8}")
+# "SuporteFlyer" is two words.
+_CAMEL = re.compile(r"(?<=[a-zà-ÿ])(?=[A-ZÀ-Þ])")
 
 
 def normalize_username(value: str) -> str:
@@ -56,7 +60,12 @@ def is_reserved_username(value: str) -> bool:
 
 def username_problem(value: str) -> str | None:
     """`"invalid"`, `"reserved"` or None for a normalized username."""
-    if not _FORMAT.fullmatch(value) or ".." in value or not re.search(r"[a-z]", value):
+    if (
+        not _FORMAT.fullmatch(value)
+        or ".." in value
+        or not re.search(r"[a-z]", value)
+        or _LONG_NUMBER.search(value)
+    ):
         return "invalid"
     if is_reserved_username(value):
         return "reserved"
@@ -68,6 +77,13 @@ def _fold(text: str) -> str:
     return "".join(c for c in decomposed if not unicodedata.combining(c)).lower()
 
 
+def has_hidden_characters(text: str) -> bool:
+    """Control and format characters (zero-width space, right-to-left override…): they
+    make a nickname read differently from what it is."""
+    return any(unicodedata.category(c) in {"Cc", "Cf"} for c in text)
+
+
 def uses_authority_word(text: str) -> bool:
-    """True when a nickname contains one of the AUTHORITY_WORDS as a word ("Suporte Flyer")."""
-    return any(word in AUTHORITY_WORDS for word in _WORDS.split(_fold(text)))
+    """True when a nickname contains one of the AUTHORITY_WORDS as a word ("Suporte
+    Flyer", "SuporteFlyer")."""
+    return any(word in AUTHORITY_WORDS for word in _WORDS.split(_fold(_CAMEL.sub(" ", text))))

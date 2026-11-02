@@ -1,9 +1,10 @@
 """@username, nickname and photo on profiles (migration 20261102000000, #32 and #24).
 
-Decisions 2026-11-01: every profile has a unique @username (accounts that existed get
-one made from the full name; a sign-up may bring the one it chose), the nickname is
-optional and never comes from the sign-up metadata, and `profiles.email` follows the
-e-mail of the account in Auth.
+Decisions 2026-11-01: every profile has a unique @username made from the full name
+(accounts that existed too), the nickname is optional, and neither comes from the
+sign-up metadata (the backend writes the chosen ones after its moderation; whoever calls
+Supabase Auth directly would skip it). `profiles.email` follows the e-mail of the
+account in Auth.
 """
 
 from __future__ import annotations
@@ -70,30 +71,18 @@ def _username(conn: Any, user_id: str) -> str:
     return _profile(conn, user_id)[0]
 
 
-def test_a_sign_up_keeps_the_free_username_it_chose(db: Any) -> None:
-    user = _signup(db, "ana@example.com", {"name": "Ana Beatriz", "username": "ana.bia", "flyer_signup": True})
+def test_a_sign_up_gets_a_username_from_its_name(db: Any) -> None:
+    user = _signup(db, "ana@example.com", {"name": "Ana Beatriz", "flyer_signup": True})
 
-    assert _profile(db, user) == ("ana.bia", None, None, None)
-
-
-def test_the_chosen_username_is_stored_in_lower_case(db: Any) -> None:
-    user = _signup(db, "ana@example.com", {"name": "Ana", "username": "  Ana.Bia "})
-
-    assert _username(db, user) == "ana.bia"
+    assert _profile(db, user) == ("ana.beatriz", None, None, None)
 
 
-@pytest.mark.parametrize("wanted", ["A!", "ab", "flyer1", "admin_br", "ana..b", "81999998888"])
-def test_an_invalid_or_reserved_username_is_replaced_by_one_from_the_name(db: Any, wanted: str) -> None:
+@pytest.mark.parametrize("wanted", ["ana.bia", "palavrao.feio", "A!", "flyer1"])
+def test_a_username_in_the_metadata_is_ignored(db: Any, wanted: str) -> None:
+    # Whoever calls Supabase Auth directly would skip the backend's moderation.
     user = _signup(db, "ana@example.com", {"name": "Ana Lima", "username": wanted})
 
     assert _username(db, user) == "ana.lima"
-
-
-def test_a_taken_username_is_replaced_by_one_from_the_name(db: Any) -> None:
-    _signup(db, "ana@example.com", {"name": "Ana", "username": "ana"})
-    second = _signup(db, "ana2@example.com", {"name": "Ana Paula", "username": "ana"})
-
-    assert _username(db, second) == "ana.paula"
 
 
 def test_google_accounts_get_a_username_from_the_full_name(db: Any) -> None:
@@ -122,6 +111,8 @@ def test_google_accounts_get_a_username_from_the_full_name(db: Any) -> None:
         ("José da Silva Xavier Pereira", "jose.da.silva.x"),
         ("x" * 100, "x" * 15),
         ("2026", "usuario"),
+        ("Ana 81999998888", "usuario"),
+        ("Turma 2026", "turma.2026"),
     ],
 )
 def test_generated_usernames(db: Any, name: str | None, expected: str) -> None:
@@ -129,6 +120,14 @@ def test_generated_usernames(db: Any, name: str | None, expected: str) -> None:
 
     assert generated == expected
     assert username_problem(generated) is None
+
+
+def test_digits_added_to_a_name_ending_in_digits_come_after_an_underscore(db: Any) -> None:
+    first = _signup(db, "t1@example.com", {"name": "Turma 1234567"})
+    second = _signup(db, "t2@example.com", {"name": "Turma 1234567"})
+
+    assert _username(db, first) == "turma.1234567"
+    assert re.fullmatch(r"turma\.1234567_\d{2,4}", _username(db, second))
 
 
 def test_the_generator_never_returns_a_taken_username(db: Any) -> None:
@@ -184,7 +183,7 @@ def test_existing_profiles_get_a_username_and_their_email_from_auth(empty_db: An
 def test_two_sign_ups_racing_for_the_same_username_both_succeed(db: Any) -> None:
     url = db.info.dsn
     first_id = str(uuid.uuid4())
-    meta = json.dumps({"name": "Ana Souza", "username": "ana"})
+    meta = json.dumps({"name": "Ana Souza"})
     with psycopg.connect(url) as first:
         first.execute(
             "insert into auth.users (id, email, raw_user_meta_data) values (%s, 'a1@example.com', %s::jsonb)",
@@ -197,7 +196,7 @@ def test_two_sign_ups_racing_for_the_same_username_both_succeed(db: Any) -> None
         def second_sign_up() -> None:
             try:
                 with psycopg.connect(url, autocommit=True) as second:
-                    result["id"] = _signup(second, "a2@example.com", {"name": "Ana Souza", "username": "ana"})
+                    result["id"] = _signup(second, "a2@example.com", {"name": "Ana Souza"})
             except Exception as exc:  # noqa: BLE001
                 result["error"] = exc
 
@@ -209,8 +208,8 @@ def test_two_sign_ups_racing_for_the_same_username_both_succeed(db: Any) -> None
         worker.join(timeout=10)
 
     assert "error" not in result, result.get("error")
-    assert _username(db, first_id) == "ana"
-    assert re.fullmatch(r"ana\.souza(\d{2,4})?", _username(db, result["id"]))
+    assert _username(db, first_id) == "ana.souza"
+    assert re.fullmatch(r"ana\.souza\d{2,4}", _username(db, result["id"]))
 
 
 def test_a_cpf_clash_still_fails_the_sign_up(db: Any) -> None:
@@ -285,6 +284,7 @@ PROBES = [
     "pedro.guerra", "ana_b", "flyer", "flyer1", "admin_br", "pedro.flyer", "flyerzinho", "ajudante",
     "ab", "a" * 20, "a" * 21, ".ana", "ana.", "ana..b", "81999998888", "ana2026", "_ana_", "null",
     "www.ana", "equipe.azul", "seguranca", "sistema9", "root_", "api.x", "contatos",
+    "ana81999998888", "a52998224725", "ana1234567", "12345678ab",
 ]
 
 

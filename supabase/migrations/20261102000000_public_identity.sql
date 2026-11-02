@@ -2,14 +2,12 @@
 -- 2026-11-01).
 --
 -- What other people see of someone is their @username, nickname and photo; the full
--- name stays private. Every profile gets a unique @username:
--- * a sign-up may bring the one it chose (metadata `username`), taken only when it is
---   valid, free and not reserved;
--- * otherwise, and for the accounts that already existed, one is made from the full
---   name (`pedro.guerra`, with digits when taken), which the person can change later
---   (once every 30 days, enforced by the backend through `username_changed_at`).
--- The nickname is never copied from the metadata: whoever calls Supabase Auth directly
--- would skip the moderation the backend applies before writing it.
+-- name stays private. Every profile gets a unique @username made from the full name
+-- (`pedro.guerra`, with digits when taken), the accounts that already existed too; the
+-- person changes it later (once every 30 days, enforced by the backend through
+-- `username_changed_at`). The @username and nickname chosen at sign-up are written by
+-- the backend after its moderation, never taken from the sign-up metadata: whoever
+-- calls Supabase Auth directly with the publishable key would skip it.
 --
 -- `profiles.email` now follows the e-mail of the account in Auth, which the e-mail
 -- change of "Meus dados" relies on. Backend only: no grants for clients. No DROP.
@@ -48,8 +46,8 @@ as $fn$
   );
 $fn$;
 
--- 3 to 20 of [a-z0-9._], not starting or ending with a dot, no "..", at least one letter
--- (eleven digits could be a phone or a CPF) and not reserved.
+-- 3 to 20 of [a-z0-9._], not starting or ending with a dot, no "..", at least one letter,
+-- at most 7 digits in a row (no phone or CPF fits) and not reserved.
 create or replace function public.is_valid_username(value text)
 returns boolean
 language sql
@@ -60,12 +58,14 @@ as $fn$
      and value ~ '^[a-z0-9_][a-z0-9._]{1,18}[a-z0-9_]$'
      and value !~ '\.\.'
      and value ~ '[a-z]'
+     and value !~ '[0-9]{8}'
      and not public.is_reserved_username(value);
 $fn$;
 
 -- A free @username made from a full name: lower case, without accents, words joined by
--- dots, at most 15 characters, plus digits when taken. `usuario` when the name gives
--- nothing usable (empty, too short, no letter, only emoji or other scripts, reserved).
+-- dots, at most 15 characters, plus digits when taken (after a `_` when the name already
+-- ends in digits). `usuario` when the name gives nothing usable (empty, too short, no
+-- letter, only emoji or other scripts, reserved).
 create or replace function public.generate_username(full_name text)
 returns text
 language plpgsql
@@ -89,13 +89,16 @@ begin
 
   candidate := base;
   for attempt in 1..30 loop
-    if not exists (select 1 from public.profiles where username = candidate) then
+    if public.is_valid_username(candidate)
+       and not exists (select 1 from public.profiles where username = candidate) then
       return candidate;
     end if;
-    candidate := base || case
-      when attempt <= 10 then (10 + floor(random() * 90))::int::text
-      else (1000 + floor(random() * 9000))::int::text
-    end;
+    candidate := base
+      || case when base ~ '[0-9]$' then '_' else '' end
+      || case
+           when attempt <= 10 then (10 + floor(random() * 90))::int::text
+           else (1000 + floor(random() * 9000))::int::text
+         end;
   end loop;
   return 'usuario' || lpad(floor(random() * 1000000)::int::text, 6, '0');
 end;
@@ -103,9 +106,8 @@ $fn$;
 
 create unique index if not exists profiles_username_key on public.profiles (username);
 
--- Any profile inserted without a username gets one: the Auth trigger below when the
--- sign-up brought none (or an unusable one), and the backend's get_or_create_profile,
--- which inserts only the id.
+-- Any profile inserted without a username gets one: every new account (the Auth
+-- trigger below) and the backend's get_or_create_profile, which inserts only the id.
 create or replace function public.profiles_fill_username()
 returns trigger
 language plpgsql
@@ -123,9 +125,10 @@ create or replace trigger profiles_fill_username
   before insert on public.profiles
   for each row execute function public.profiles_fill_username();
 
--- Same body as 20261016000000 plus the chosen username. Two sign-ups racing for the same
--- free username: the one that loses gets one made from its name. A clash on the CPF or
--- the phone still fails the sign-up (the backend answers 409).
+-- Same body as 20261016000000; the username comes from profiles_fill_username. Two
+-- sign-ups with the same name at once: the one whose username is taken while it waits
+-- tries again and gets another. A clash on the CPF or the phone still fails the sign-up
+-- (the backend answers 409).
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
@@ -135,20 +138,13 @@ as $fn$
 declare
   free_plan_id uuid;
   meta jsonb := coalesce(new.raw_user_meta_data, '{}'::jsonb);
-  wanted text := lower(nullif(btrim(meta->>'username'), ''));
   violated text;
 begin
   select id into free_plan_id from public.subscription_plans where name = 'Free' limit 1;
 
-  if wanted is not null
-     and (not public.is_valid_username(wanted)
-          or exists (select 1 from public.profiles where username = wanted)) then
-    wanted := null;
-  end if;
-
   for attempt in 1..5 loop
     begin
-      insert into public.profiles (id, name, email, plan_id, cpf, phone, signup_pending, username)
+      insert into public.profiles (id, name, email, plan_id, cpf, phone, signup_pending)
       values (
         new.id,
         coalesce(meta->>'name', meta->>'full_name'),
@@ -156,8 +152,7 @@ begin
         free_plan_id,
         nullif(meta->>'cpf', ''),
         nullif(meta->>'phone', ''),
-        coalesce(meta->>'flyer_signup', '') = 'true',
-        wanted
+        coalesce(meta->>'flyer_signup', '') = 'true'
       );
       exit;
     exception when unique_violation then
@@ -165,7 +160,6 @@ begin
       if violated is distinct from 'profiles_username_key' or attempt = 5 then
         raise;
       end if;
-      wanted := null;
     end;
   end loop;
 

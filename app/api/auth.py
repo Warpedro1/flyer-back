@@ -46,6 +46,7 @@ from app.core.personal_data import find_personal_data
 from app.core.tz import LOCAL_TZ, parse_aware
 from app.core.usernames import (
     NICKNAME_MAX_LENGTH,
+    has_hidden_characters,
     normalize_username,
     username_problem,
     uses_authority_word,
@@ -106,8 +107,8 @@ STALE_SIGNUP_AFTER = timedelta(hours=24)
 
 USERNAME_TAKEN_MESSAGE = _TAKEN["username"] + " Escolha outro."
 USERNAME_RULE_MESSAGE = (
-    "Use de 3 a 20 letras minúsculas sem acento, números, ponto ou _, com pelo menos uma "
-    "letra e sem ponto no começo, no fim ou repetido."
+    "Use de 3 a 20 letras minúsculas sem acento, números (até 7 seguidos), ponto ou _, com "
+    "pelo menos uma letra e sem ponto no começo, no fim ou repetido."
 )
 
 
@@ -125,18 +126,23 @@ def _ticket_hash(ticket: str) -> str:
 
 
 async def _forgotten_sign_up(db: DbServiceDep, holder: dict[str, Any]) -> bool:
-    """A pending sign-up older than its ticket, or without one, can never be finished."""
+    """A pending sign-up whose ticket is older than its lifetime can never be finished.
+    Without a ticket it is still being created (the ticket comes right after)."""
     if not holder.get("signup_pending"):
         return False
     created = await db.get_signup_ticket_created_at(str(holder["id"]))
-    return created is None or _now() - created > STALE_SIGNUP_AFTER
+    return created is not None and _now() - created > STALE_SIGNUP_AFTER
 
 
-async def _username_holder(db: DbServiceDep, username: str, *, user_id: str | None = None) -> tuple[bool, str | None]:
+async def _username_holder(
+    db: DbServiceDep, username: str, *, user_id: str | None = None, replaced: frozenset[str] = frozenset()
+) -> tuple[bool, str | None]:
     """(taken, forgotten sign-up to delete). A recent pending sign-up keeps its
-    @username: anyone could otherwise cancel someone's sign-up by picking the same one."""
+    @username: anyone could otherwise cancel someone's sign-up by picking the same one.
+    ``replaced``: pending sign-ups this request deletes anyway (the same person trying
+    again with the same e-mail, CPF or phone)."""
     holder = await db.get_username_holder(username)
-    if not holder or str(holder.get("id")) == user_id:
+    if not holder or str(holder.get("id")) == user_id or str(holder.get("id")) in replaced:
         return False, None
     if await _forgotten_sign_up(db, holder):
         return False, str(holder["id"])
@@ -156,22 +162,28 @@ async def _claim_identity(
     way (wrong e-mail, another device, lost code) and are deleted. For the @username,
     only once the sign-up was forgotten (``_username_holder``)."""
     taken: set[str] = set()
+    replaced: list[str] = []
     if email or cpf or phone:
         conflict_args: dict[str, str] = {"exclude_user_id": exclude_user_id} if exclude_user_id else {}
         taken = set(
             await db.find_identity_conflicts(email=email, cpf=cpf, phone=phone, **conflict_args, active_only=True)
         )
+        replaced = [
+            stale_id
+            for stale_id in await db.find_pending_signups(email=email, cpf=cpf, phone=phone)
+            if stale_id != exclude_user_id
+        ]
     forgotten: str | None = None
     if username:
-        username_taken, forgotten = await _username_holder(db, username, user_id=exclude_user_id)
+        username_taken, forgotten = await _username_holder(
+            db, username, user_id=exclude_user_id, replaced=frozenset(replaced)
+        )
         if username_taken:
             taken.add("username")
     if taken:
         raise _conflict(taken)
-    if email or cpf or phone:
-        for stale_id in await db.find_pending_signups(email=email, cpf=cpf, phone=phone):
-            if stale_id != exclude_user_id:
-                await db.delete_auth_user(stale_id)
+    for stale_id in replaced:
+        await db.delete_auth_user(stale_id)
     if forgotten:
         await db.delete_auth_user(forgotten)
 
@@ -194,6 +206,8 @@ def _nickname_value(raw: str | None) -> str | None:
         return None
     if len(nickname) > NICKNAME_MAX_LENGTH:
         raise ApiError(422, "nickname_too_long", f"O vulgo pode ter até {NICKNAME_MAX_LENGTH} caracteres.")
+    if has_hidden_characters(nickname):
+        raise ApiError(422, "nickname_invalid", "O vulgo não pode ter caracteres invisíveis ou de controle.")
     if uses_authority_word(nickname):
         raise ApiError(
             422, "nickname_reserved", "O vulgo não pode usar palavras como Flyer, admin, suporte ou moderação."
@@ -226,6 +240,12 @@ async def _check_public_texts(*, username: str | None = None, nickname: str | No
                 CONTENT_BLOCKED,
                 f"{label} foi recusado pela moderação ({reasons(verdict.categories)}). Escolha outro.",
             )
+
+
+async def _update_own(db: DbServiceDep, user_id: str, data: dict[str, Any]) -> None:
+    """Write the owner's fields; 401 `session_invalid` when the account is gone."""
+    if not await db.update_own_profile(user_id, data):
+        raise session_invalid()
 
 
 def _username_too_soon(available_at: datetime | None) -> ApiError:
@@ -264,9 +284,6 @@ async def signup(request: Request, body: SignupIn, db: DbServiceDep) -> SignupOu
                 "cpf": body.cpf,
                 # Optional (#29): the profile trigger stores a missing one as null.
                 **({"phone": body.phone} if body.phone else {}),
-                # Taken by the profile trigger when still free. Never the nickname: the
-                # metadata is what Supabase Auth stores without the moderation.
-                **({"username": username} if username else {}),
                 # The profile trigger creates the profile as pending.
                 "flyer_signup": True,
             },
@@ -289,14 +306,28 @@ async def signup(request: Request, body: SignupIn, db: DbServiceDep) -> SignupOu
             status_code=status.HTTP_409_CONFLICT,
             detail="Este CPF, telefone ou e-mail já tem uma conta.",
         ) from None
-    if nickname:
-        try:
-            await db.update_own_profile(user_id, {"nickname": nickname})
-        except Exception as exc:  # noqa: BLE001 — optional: it can be set in "Meus dados"
-            logger.warning("Saving the nickname at sign-up failed (%s)", type(exc).__name__)
+    # The ticket first: until it exists the new account counts as "being created".
     ticket = secrets.token_urlsafe(32)
     await db.create_signup_ticket(user_id, _ticket_hash(ticket))
+    await _save_chosen_identity(db, user_id, username, nickname)
     return SignupOut(ticket=ticket)
+
+
+async def _save_chosen_identity(db: DbServiceDep, user_id: str, username: str | None, nickname: str | None) -> None:
+    """The @username and nickname chosen at sign-up, already moderated. Never through the
+    sign-up metadata, which Supabase Auth stores as given. Best effort: the account keeps
+    the @username made from the name, and both can be set in "Meus dados"."""
+    data = {key: value for key, value in (("username", username), ("nickname", nickname)) if value}
+    if not data:
+        return
+    try:
+        await db.update_own_profile(user_id, data)
+    except UniqueViolationError:
+        # The @username was taken a moment ago: keep the one made from the name.
+        if nickname:
+            await _save_chosen_identity(db, user_id, None, nickname)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Saving the chosen identity at sign-up failed (%s)", type(exc).__name__)
 
 
 @router.post("/signup/activate", status_code=status.HTTP_204_NO_CONTENT)
@@ -388,6 +419,8 @@ async def my_profile(request: Request, user_id: MyAccountDep, db: DbServiceDep) 
     """The owner's own data (#24): name, @username, nickname, e-mail, CPF and phone
     masked, and the photo. Never the taste keywords (decision 2026-11-01)."""
     row = await db.get_my_profile(user_id)
+    if not row:
+        raise session_invalid()
     photo = row.get("avatar_path")
     avatars = await sign_avatars(db, [photo])
     changed = parse_aware(row.get("username_changed_at"))
@@ -409,7 +442,7 @@ async def my_profile(request: Request, user_id: MyAccountDep, db: DbServiceDep) 
 @limiter.limit("20/hour")
 async def change_name(request: Request, body: NameIn, user_id: MyAccountDep, db: DbServiceDep) -> Response:
     """The full name, which only the owner sees (decision 2026-11-01)."""
-    await db.update_own_profile(user_id, {"name": body.name})
+    await _update_own(db, user_id, {"name": body.name})
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -423,6 +456,8 @@ async def change_username(
     username = normalize_username(body.username)
     _require_username_rules(username)
     current = await db.get_my_profile(user_id)
+    if not current:
+        raise session_invalid()
     if current.get("username") == username:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     now = _now()
@@ -453,7 +488,7 @@ async def change_nickname(
     """The nickname ("vulgo", optional): empty removes it."""
     nickname = _nickname_value(body.nickname)
     await _check_public_texts(nickname=nickname)
-    await db.update_own_profile(user_id, {"nickname": nickname})
+    await _update_own(db, user_id, {"nickname": nickname})
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -464,7 +499,7 @@ async def change_phone(request: Request, body: PhoneIn, user_id: MyAccountDep, d
     if body.phone:
         await _claim_identity(db, email=None, cpf=None, phone=body.phone, exclude_user_id=user_id)
     try:
-        await db.update_own_profile(user_id, {"phone": body.phone})
+        await _update_own(db, user_id, {"phone": body.phone})
     except UniqueViolationError:
         raise _conflict({"phone"}) from None
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -491,8 +526,12 @@ async def change_avatar(request: Request, body: AvatarIn, user_id: MyAccountDep,
             CONTENT_BLOCKED,
             f"A foto foi recusada pela moderação ({reasons(verdict.categories)}). Escolha outra.",
         )
-    previous = (await db.get_my_profile(user_id)).get("avatar_path")
-    await db.update_own_profile(user_id, {"avatar_path": body.path})
+    current = await db.get_my_profile(user_id)
+    if not current:
+        await discard_avatars(db, [body.path])
+        raise session_invalid()
+    previous = current.get("avatar_path")
+    await _update_own(db, user_id, {"avatar_path": body.path})
     if previous != body.path:
         await discard_avatars(db, [previous])
     avatars = await sign_avatars(db, [body.path])
@@ -504,7 +543,7 @@ async def change_avatar(request: Request, body: AvatarIn, user_id: MyAccountDep,
 async def remove_avatar(request: Request, user_id: MyAccountDep, db: DbServiceDep) -> Response:
     """Remove the photo (the file goes too)."""
     previous = (await db.get_my_profile(user_id)).get("avatar_path")
-    await db.update_own_profile(user_id, {"avatar_path": None})
+    await _update_own(db, user_id, {"avatar_path": None})
     await discard_avatars(db, [previous])
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

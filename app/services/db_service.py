@@ -413,15 +413,18 @@ class DBService:
         rows = r.json()
         return dict(rows[0]) if isinstance(rows, list) and rows else {}
 
-    async def update_own_profile(self, user_id: str, data: dict[str, Any]) -> None:
-        """Write the owner's own fields. A repeated phone raises UniqueViolationError."""
+    async def update_own_profile(self, user_id: str, data: dict[str, Any]) -> bool:
+        """Write the owner's own fields; False when the account no longer exists. A
+        repeated phone or @username raises UniqueViolationError."""
         r = await self._client.patch(
             f"{REST_PREFIX}/profiles",
-            params={"id": f"eq.{user_id}"},
+            params={"id": f"eq.{user_id}", "select": "id"},
             json=data,
-            headers={**self._admin_headers(), "Prefer": "return=minimal"},
+            headers={**self._admin_headers(), "Prefer": "return=representation"},
         )
         await self._raise_for_supabase(r)
+        rows = r.json()
+        return isinstance(rows, list) and bool(rows)
 
     async def change_username(self, user_id: str, username: str, *, not_changed_since: datetime) -> bool:
         """Set a new @username unless the person changed it after ``not_changed_since``.
