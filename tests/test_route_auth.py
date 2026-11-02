@@ -16,6 +16,7 @@ from fastapi.routing import APIRoute
 
 from app.api.deps import (
     get_current_user,
+    get_current_user_incomplete_profile,
     get_current_user_pending_code,
     get_current_user_pending_profile,
     get_current_user_with_token,
@@ -27,10 +28,17 @@ AUTH_DEPENDENCIES: set[Callable[..., Any]] = {get_current_user, get_current_user
 # The e-mail code routes run before the code is verified: they authenticate the
 # token but not the second factor. Nowhere else may use that dependency.
 EMAIL_CODE_PREFIX = "/auth/email-code/"
-# Completing CPF and phone runs before the profile is complete (but after the code).
+# The account's own data runs before the profile is complete (but after the code):
+# "Meus dados" (#24) with an activated sign-up and the CPF optional...
 PROFILE_PREFIX = "/auth/profile/"
-# Activating a sign-up happens while the account is still pending (decision 2026-10-14).
-SIGNUP_ACTIVATE = ("POST", "/auth/signup/activate")
+# ...and these few also while the sign-up still waits for its code (decision
+# 2026-10-14): activating it, and the status and CPF steps of the first access.
+PENDING_PROFILE_ROUTES: set[tuple[str, str]] = {
+    ("POST", "/auth/signup/activate"),
+    ("GET", "/auth/profile/status"),
+    ("POST", "/auth/profile/intro-seen"),
+    ("PUT", "/auth/profile/identity"),
+}
 
 # Reachable without a token, on purpose. Anything added here is public to the internet.
 PUBLIC_ROUTES: set[tuple[str, str]] = {
@@ -39,6 +47,9 @@ PUBLIC_ROUTES: set[tuple[str, str]] = {
     ("GET", "/plans/"),
     # Sign-up by e-mail: no account yet. Rate limited per client (app/api/auth.py).
     ("POST", "/auth/signup"),
+    # Whether a @username is free while the sign-up form is typed (#32). It says only
+    # what every profile shows; rate limited per client.
+    ("GET", "/auth/username-available"),
 }
 
 # Protected by a shared secret instead of a user JWT: the admin token, or the
@@ -117,12 +128,20 @@ def test_route_requires_authentication(route: APIRoute, method: str, path: str) 
     assert get_current_user_pending_code not in calls, (
         f"{method} {path} skips the e-mail code: only {EMAIL_CODE_PREFIX}* may do that."
     )
-    if path.startswith(PROFILE_PREFIX) or (method, path) == SIGNUP_ACTIVATE:
+    if (method, path) in PENDING_PROFILE_ROUTES:
         assert get_current_user_pending_profile in calls, f"{method} {path} must authenticate the token."
         return
     assert get_current_user_pending_profile not in calls, (
-        f"{method} {path} skips the account checks (CPF/phone, pending sign-up): only "
-        f"{PROFILE_PREFIX}* and {' '.join(SIGNUP_ACTIVATE)} may do that."
+        f"{method} {path} lets a pending sign-up in: only {sorted(PENDING_PROFILE_ROUTES)} may do that."
+    )
+    if path.startswith(PROFILE_PREFIX):
+        assert get_current_user_incomplete_profile in calls, (
+            f"{method} {path} must use get_current_user_incomplete_profile (code verified, sign-up "
+            "activated, CPF optional)."
+        )
+        return
+    assert get_current_user_incomplete_profile not in calls, (
+        f"{method} {path} skips the CPF check: only {PROFILE_PREFIX}* may do that."
     )
     assert AUTH_DEPENDENCIES & calls, (
         f"{method} {path} does not depend on get_current_user*. Add the dependency, "
@@ -135,3 +154,4 @@ def test_public_list_has_no_stale_entries() -> None:
     # with the old path inherits silently.
     existing = {(m, p) for r in _api_routes() for m, p in _endpoints(r)}
     assert PUBLIC_ROUTES <= existing
+    assert PENDING_PROFILE_ROUTES <= existing

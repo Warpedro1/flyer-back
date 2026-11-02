@@ -8,6 +8,7 @@ one of these helpers, or filter by the `user_id` taken from the token.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -80,6 +81,30 @@ def require_trophy_icon(user_id: str, path: str) -> None:
             detail="O ícone do troféu precisa ser uma imagem enviada para o Flyer.",
         )
     require_media_paths_owned(user_id, [path])
+
+
+_AVATAR_FILE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:jpg|png|webp)")
+
+
+def require_avatar_path(user_id: str, path: str) -> None:
+    """A profile photo is a file the person uploaded to their own folder of the avatars
+    bucket, named by the app (`{uid}/{uuid}.jpg|png|webp`, #24)."""
+    if _is_absolute_url(path):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A foto precisa ser enviada para o Flyer.",
+        )
+    folder, _, name = path.partition("/")
+    if folder != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Você só pode usar uma foto que você mesmo enviou.",
+        )
+    if not _AVATAR_FILE.fullmatch(name):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Envie a foto de novo pelo app, em JPG, PNG ou WEBP.",
+        )
 
 
 def require_media_paths_owned(user_id: str, paths: Iterable[str]) -> None:

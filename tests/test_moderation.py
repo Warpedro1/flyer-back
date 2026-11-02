@@ -213,7 +213,7 @@ async def test_private_photos_are_signed_for_two_minutes_only() -> None:
     with patch.object(moderation, "image_verdicts", AsyncMock(return_value=[Verdict(True)])) as images:
         await real_path_verdicts(db, ["user-1/a.jpg"])
 
-    assert db.sign_media_paths.await_args.kwargs == {"ttl": 120}
+    assert db.sign_media_paths.await_args.kwargs == {"ttl": 120, "bucket": None}
     images.assert_awaited_once_with(["https://signed/a"])
 
 

@@ -9,6 +9,9 @@
   Supabase Auth e-mails to the account before using the API. The address always comes
   from the token, never from the client.
 * CPF and phone on every account: Google accounts complete them on first access.
+* "Meus dados" and the public identity (#24, #32; decisions 2026-11-01): the owner
+  edits their name (private), @username (once every 30 days), nickname, phone and
+  photo. What other people see goes through personal data and the moderation first.
 
 `app/api/deps.py` enforces the code and the complete profile on every other route;
 the routes here skip exactly the check they exist to satisfy.
@@ -19,31 +22,63 @@ from __future__ import annotations
 import hashlib
 import logging
 import secrets
-from typing import Annotated
+from datetime import datetime, timedelta, timezone
+from typing import Annotated, Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
+from app.api.authz import require_avatar_path
 from app.api.deps import (
     DbServiceDep,
     PendingSession,
+    get_current_user_incomplete_profile,
     get_current_user_pending_code,
     get_current_user_pending_profile,
     remember_complete_profile,
     remember_verified_session,
 )
 from app.core.br_documents import mask_cpf, mask_phone
+from app.core.config import settings
 from app.core.errors import SESSION_INVALID_MESSAGE, ApiError, session_invalid
 from app.core.limiter import limiter
+from app.core.personal_data import find_personal_data
+from app.core.tz import LOCAL_TZ, parse_aware
+from app.core.usernames import (
+    NICKNAME_MAX_LENGTH,
+    normalize_username,
+    username_problem,
+    uses_authority_word,
+)
 from app.models.schemas import (
+    AvatarIn,
+    AvatarRead,
     EmailCodeIn,
     EmailCodeStatus,
+    MyProfileRead,
+    NameIn,
+    NicknameIn,
+    PhoneIn,
     ProfileIdentityIn,
     ProfileIdentityStatus,
     SignupActivateIn,
     SignupIn,
     SignupOut,
+    UsernameAvailability,
+    UsernameIn,
 )
+from app.services import moderation
+from app.services.db_service import UniqueViolationError
+from app.services.moderation import (
+    CONTENT_BLOCKED,
+    MODERATION_UNAVAILABLE,
+    MODERATION_UNAVAILABLE_MESSAGE,
+    PERSONAL_DATA,
+    ModerationUnavailable,
+    reasons,
+    text_verdicts,
+)
+from app.services.public_profile import discard_avatars, sign_avatars
 
 logger = logging.getLogger(__name__)
 
@@ -51,17 +86,37 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 PendingDep = Annotated[PendingSession, Depends(get_current_user_pending_code)]
 PendingProfileDep = Annotated[str, Depends(get_current_user_pending_profile)]
+# "Meus dados": the code and an activated sign-up, the CPF may still be missing (#24).
+MyAccountDep = Annotated[str, Depends(get_current_user_incomplete_profile)]
 
 # Said plainly (decision 2026-10-12), in this order when several are taken.
 _TAKEN = {
     "email": "Este e-mail já tem uma conta.",
     "cpf": "Este CPF já tem uma conta.",
     "phone": "Este telefone já tem uma conta.",
+    "username": "Este @usuário já está em uso.",
 }
+_TAKEN_ORDER = ("email", "cpf", "phone", "username")
+
+# The @username changes once every 30 days (decision 2026-11-01).
+USERNAME_CHANGE_INTERVAL = timedelta(days=30)
+# A sign-up that waited longer than its ticket (24 h in the app) will never be
+# finished: it no longer holds its @username.
+STALE_SIGNUP_AFTER = timedelta(hours=24)
+
+USERNAME_TAKEN_MESSAGE = _TAKEN["username"] + " Escolha outro."
+USERNAME_RULE_MESSAGE = (
+    "Use de 3 a 20 letras minúsculas sem acento, números, ponto ou _, com pelo menos uma "
+    "letra e sem ponto no começo, no fim ou repetido."
+)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _conflict(taken: set[str]) -> HTTPException:
-    message = " ".join(_TAKEN[field] for field in ("email", "cpf", "phone") if field in taken)
+    message = " ".join(_TAKEN[field] for field in _TAKEN_ORDER if field in taken)
     return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=message)
 
 
@@ -69,20 +124,116 @@ def _ticket_hash(ticket: str) -> str:
     return hashlib.sha256(ticket.encode()).hexdigest()
 
 
+async def _forgotten_sign_up(db: DbServiceDep, holder: dict[str, Any]) -> bool:
+    """A pending sign-up older than its ticket, or without one, can never be finished."""
+    if not holder.get("signup_pending"):
+        return False
+    created = await db.get_signup_ticket_created_at(str(holder["id"]))
+    return created is None or _now() - created > STALE_SIGNUP_AFTER
+
+
+async def _username_holder(db: DbServiceDep, username: str, *, user_id: str | None = None) -> tuple[bool, str | None]:
+    """(taken, forgotten sign-up to delete). A recent pending sign-up keeps its
+    @username: anyone could otherwise cancel someone's sign-up by picking the same one."""
+    holder = await db.get_username_holder(username)
+    if not holder or str(holder.get("id")) == user_id:
+        return False, None
+    if await _forgotten_sign_up(db, holder):
+        return False, str(holder["id"])
+    return True, None
+
+
 async def _claim_identity(
-    db: DbServiceDep, *, email: str | None, cpf: str, phone: str | None, exclude_user_id: str | None = None
+    db: DbServiceDep,
+    *,
+    email: str | None,
+    cpf: str | None,
+    phone: str | None,
+    username: str | None = None,
+    exclude_user_id: str | None = None,
 ) -> None:
     """409 if an active account has them; sign-ups still waiting for their code give
-    way (wrong e-mail, another device, lost code) and are deleted."""
-    conflict_args: dict[str, str] = {"exclude_user_id": exclude_user_id} if exclude_user_id else {}
-    taken = await db.find_identity_conflicts(
-        email=email, cpf=cpf, phone=phone, **conflict_args, active_only=True
-    )
+    way (wrong e-mail, another device, lost code) and are deleted. For the @username,
+    only once the sign-up was forgotten (``_username_holder``)."""
+    taken: set[str] = set()
+    if email or cpf or phone:
+        conflict_args: dict[str, str] = {"exclude_user_id": exclude_user_id} if exclude_user_id else {}
+        taken = set(
+            await db.find_identity_conflicts(email=email, cpf=cpf, phone=phone, **conflict_args, active_only=True)
+        )
+    forgotten: str | None = None
+    if username:
+        username_taken, forgotten = await _username_holder(db, username, user_id=exclude_user_id)
+        if username_taken:
+            taken.add("username")
     if taken:
         raise _conflict(taken)
-    for stale_id in await db.find_pending_signups(email=email, cpf=cpf, phone=phone):
-        if stale_id != exclude_user_id:
-            await db.delete_auth_user(stale_id)
+    if email or cpf or phone:
+        for stale_id in await db.find_pending_signups(email=email, cpf=cpf, phone=phone):
+            if stale_id != exclude_user_id:
+                await db.delete_auth_user(stale_id)
+    if forgotten:
+        await db.delete_auth_user(forgotten)
+
+
+# ------------------------------------------- what other people will see --
+
+
+def _require_username_rules(username: str) -> None:
+    problem = username_problem(username)
+    if problem == "invalid":
+        raise ApiError(422, "username_invalid", USERNAME_RULE_MESSAGE)
+    if problem == "reserved":
+        raise ApiError(422, "username_reserved", "Este @usuário é reservado. Escolha outro.")
+
+
+def _nickname_value(raw: str | None) -> str | None:
+    """The nickname to store (None removes it), or 422 with the reason."""
+    nickname = " ".join((raw or "").split())
+    if not nickname:
+        return None
+    if len(nickname) > NICKNAME_MAX_LENGTH:
+        raise ApiError(422, "nickname_too_long", f"O vulgo pode ter até {NICKNAME_MAX_LENGTH} caracteres.")
+    if uses_authority_word(nickname):
+        raise ApiError(
+            422, "nickname_reserved", "O vulgo não pode usar palavras como Flyer, admin, suporte ou moderação."
+        )
+    return nickname
+
+
+async def _check_public_texts(*, username: str | None = None, nickname: str | None = None) -> None:
+    """Personal data, then the moderation, for the @username and nickname everyone sees.
+    Moderation down is 503, never a pass (#22 A)."""
+    fields: list[tuple[str, str]] = []
+    if username:
+        # Words the moderation can read: "palavra.feia" is checked as "palavra feia".
+        fields.append(("O @usuário", username.replace(".", " ").replace("_", " ")))
+    if nickname:
+        fields.append(("O vulgo", nickname))
+    for label, text in fields:
+        if find_personal_data(text):
+            raise ApiError(422, PERSONAL_DATA, f"{label} não pode ter e-mail, telefone ou CPF.")
+    if not fields:
+        return
+    try:
+        verdicts = await text_verdicts([text for _, text in fields])
+    except ModerationUnavailable:
+        raise ApiError(503, MODERATION_UNAVAILABLE, MODERATION_UNAVAILABLE_MESSAGE) from None
+    for (label, _), verdict in zip(fields, verdicts, strict=True):
+        if not verdict.allowed:
+            raise ApiError(
+                422,
+                CONTENT_BLOCKED,
+                f"{label} foi recusado pela moderação ({reasons(verdict.categories)}). Escolha outro.",
+            )
+
+
+def _username_too_soon(available_at: datetime | None) -> ApiError:
+    if available_at is None:
+        message = "Você trocou seu @usuário há menos de 30 dias."
+    else:
+        message = f"Você poderá trocar seu @usuário de novo em {available_at.astimezone(LOCAL_TZ):%d/%m/%Y}."
+    return ApiError(409, "username_change_too_soon", message)
 
 
 # ----------------------------------------------------------------- sign-up --
@@ -94,9 +245,15 @@ async def signup(request: Request, body: SignupIn, db: DbServiceDep) -> SignupOu
     """Create a pending account; Supabase e-mails the 6-digit code.
 
     Answers the ticket the browser must present with the code (`/auth/signup/activate`).
-    Only its hash is stored.
+    Only its hash is stored. The @username and nickname are checked like in "Meus
+    dados"; without a @username (the app before #32) the database makes one.
     """
-    await _claim_identity(db, email=body.email, cpf=body.cpf, phone=body.phone)
+    username = normalize_username(body.username) if body.username and body.username.strip() else None
+    if username:
+        _require_username_rules(username)
+    nickname = _nickname_value(body.nickname)
+    await _check_public_texts(username=username, nickname=nickname)
+    await _claim_identity(db, email=body.email, cpf=body.cpf, phone=body.phone, username=username)
     try:
         user_id = await db.signup_user(
             email=body.email,
@@ -107,6 +264,9 @@ async def signup(request: Request, body: SignupIn, db: DbServiceDep) -> SignupOu
                 "cpf": body.cpf,
                 # Optional (#29): the profile trigger stores a missing one as null.
                 **({"phone": body.phone} if body.phone else {}),
+                # Taken by the profile trigger when still free. Never the nickname: the
+                # metadata is what Supabase Auth stores without the moderation.
+                **({"username": username} if username else {}),
                 # The profile trigger creates the profile as pending.
                 "flyer_signup": True,
             },
@@ -129,6 +289,11 @@ async def signup(request: Request, body: SignupIn, db: DbServiceDep) -> SignupOu
             status_code=status.HTTP_409_CONFLICT,
             detail="Este CPF, telefone ou e-mail já tem uma conta.",
         ) from None
+    if nickname:
+        try:
+            await db.update_own_profile(user_id, {"nickname": nickname})
+        except Exception as exc:  # noqa: BLE001 — optional: it can be set in "Meus dados"
+            logger.warning("Saving the nickname at sign-up failed (%s)", type(exc).__name__)
     ticket = secrets.token_urlsafe(32)
     await db.create_signup_ticket(user_id, _ticket_hash(ticket))
     return SignupOut(ticket=ticket)
@@ -168,6 +333,8 @@ async def profile_status(
     pending = bool(identity.get("signup_pending"))
     if complete and not pending:
         remember_complete_profile(user_id)
+    photo = identity.get("avatar_path")
+    avatars = await sign_avatars(db, [photo])
     return ProfileIdentityStatus(
         complete=complete,
         pending=pending,
@@ -175,6 +342,8 @@ async def profile_status(
         phone_masked=mask_phone(phone),
         intro_seen=bool(identity.get("intro_seen_at")),
         onboarded=bool(identity.get("onboarding_preferences_hash")),
+        username=identity.get("username"),
+        avatar_url=avatars.get(photo) if photo else None,
     )
 
 
@@ -194,13 +363,178 @@ async def complete_profile(
 ) -> Response:
     """Set the CPF, and the phone if given, once (Google accounts on first access)."""
     await _claim_identity(db, email=None, cpf=body.cpf, phone=body.phone, exclude_user_id=user_id)
-    if not await db.complete_profile_identity(user_id, body.cpf, body.phone):
+    try:
+        completed = await db.complete_profile_identity(user_id, body.cpf, body.phone)
+    except UniqueViolationError:
+        # Another account took the same CPF or phone a moment ago.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Este CPF ou telefone já tem uma conta."
+        ) from None
+    if not completed:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="O cadastro já está completo: o CPF não pode ser alterado por aqui.",
         )
     remember_complete_profile(user_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ------------------------------------------------------------ Meus dados --
+
+
+@router.get("/profile/me", response_model=MyProfileRead)
+@limiter.limit("60/minute")
+async def my_profile(request: Request, user_id: MyAccountDep, db: DbServiceDep) -> MyProfileRead:
+    """The owner's own data (#24): name, @username, nickname, e-mail, CPF and phone
+    masked, and the photo. Never the taste keywords (decision 2026-11-01)."""
+    row = await db.get_my_profile(user_id)
+    photo = row.get("avatar_path")
+    avatars = await sign_avatars(db, [photo])
+    changed = parse_aware(row.get("username_changed_at"))
+    available_at = changed + USERNAME_CHANGE_INTERVAL if changed else None
+    return MyProfileRead(
+        name=row.get("name"),
+        username=str(row.get("username") or ""),
+        username_change_available_at=available_at if available_at and available_at > _now() else None,
+        nickname=row.get("nickname"),
+        email=row.get("email"),
+        cpf_masked=mask_cpf(row.get("cpf")),
+        phone_masked=mask_phone(row.get("phone")),
+        avatar_url=avatars.get(photo) if photo else None,
+        complete=bool(row.get("cpf")),
+    )
+
+
+@router.put("/profile/name", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit("20/hour")
+async def change_name(request: Request, body: NameIn, user_id: MyAccountDep, db: DbServiceDep) -> Response:
+    """The full name, which only the owner sees (decision 2026-11-01)."""
+    await db.update_own_profile(user_id, {"name": body.name})
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.put("/profile/username", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit("10/hour")
+async def change_username(
+    request: Request, body: UsernameIn, user_id: MyAccountDep, db: DbServiceDep
+) -> Response:
+    """A new @username: valid, not reserved, free, through personal data and the
+    moderation, and at most once every 30 days (the old one is free at once)."""
+    username = normalize_username(body.username)
+    _require_username_rules(username)
+    current = await db.get_my_profile(user_id)
+    if current.get("username") == username:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    now = _now()
+    changed = parse_aware(current.get("username_changed_at"))
+    if changed and now < changed + USERNAME_CHANGE_INTERVAL:
+        raise _username_too_soon(changed + USERNAME_CHANGE_INTERVAL)
+    await _check_public_texts(username=username)
+    taken, forgotten = await _username_holder(db, username, user_id=user_id)
+    if taken:
+        raise ApiError(409, "username_taken", USERNAME_TAKEN_MESSAGE)
+    if forgotten:
+        await db.delete_auth_user(forgotten)
+    try:
+        saved = await db.change_username(user_id, username, not_changed_since=now - USERNAME_CHANGE_INTERVAL)
+    except UniqueViolationError:
+        raise ApiError(409, "username_taken", USERNAME_TAKEN_MESSAGE) from None
+    if not saved:
+        # Another change of this account got there first.
+        raise _username_too_soon(None)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.put("/profile/nickname", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit("20/hour")
+async def change_nickname(
+    request: Request, body: NicknameIn, user_id: MyAccountDep, db: DbServiceDep
+) -> Response:
+    """The nickname ("vulgo", optional): empty removes it."""
+    nickname = _nickname_value(body.nickname)
+    await _check_public_texts(nickname=nickname)
+    await db.update_own_profile(user_id, {"nickname": nickname})
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.put("/profile/phone", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit("10/10minute")
+async def change_phone(request: Request, body: PhoneIn, user_id: MyAccountDep, db: DbServiceDep) -> Response:
+    """Add, change or remove (empty) the phone, which stays optional and unique (#29)."""
+    if body.phone:
+        await _claim_identity(db, email=None, cpf=None, phone=body.phone, exclude_user_id=user_id)
+    try:
+        await db.update_own_profile(user_id, {"phone": body.phone})
+    except UniqueViolationError:
+        raise _conflict({"phone"}) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.put("/profile/avatar", response_model=AvatarRead)
+@limiter.limit("10/hour")
+async def change_avatar(request: Request, body: AvatarIn, user_id: MyAccountDep, db: DbServiceDep) -> AvatarRead:
+    """Use a photo the app uploaded to the person's own folder: moderated first; a
+    refused one is deleted, and the photo it replaces too."""
+    require_avatar_path(user_id, body.path)
+    try:
+        [verdict] = await moderation.path_verdicts(db, [body.path], bucket=settings.AVATAR_BUCKET)
+    except ModerationUnavailable:
+        raise ApiError(503, MODERATION_UNAVAILABLE, MODERATION_UNAVAILABLE_MESSAGE) from None
+    if verdict.missing:
+        raise ApiError(422, CONTENT_BLOCKED, "A foto não está mais disponível. Envie de novo.")
+    if verdict.unreadable or not verdict.allowed:
+        await discard_avatars(db, [body.path])
+        if verdict.unreadable:
+            raise ApiError(422, CONTENT_BLOCKED, "Não conseguimos verificar esta foto. Envie outra em JPG, PNG ou WEBP.")
+        raise ApiError(
+            422,
+            CONTENT_BLOCKED,
+            f"A foto foi recusada pela moderação ({reasons(verdict.categories)}). Escolha outra.",
+        )
+    previous = (await db.get_my_profile(user_id)).get("avatar_path")
+    await db.update_own_profile(user_id, {"avatar_path": body.path})
+    if previous != body.path:
+        await discard_avatars(db, [previous])
+    avatars = await sign_avatars(db, [body.path])
+    return AvatarRead(avatar_url=avatars.get(body.path))
+
+
+@router.delete("/profile/avatar", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit("10/hour")
+async def remove_avatar(request: Request, user_id: MyAccountDep, db: DbServiceDep) -> Response:
+    """Remove the photo (the file goes too)."""
+    previous = (await db.get_my_profile(user_id)).get("avatar_path")
+    await db.update_own_profile(user_id, {"avatar_path": None})
+    await discard_avatars(db, [previous])
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/username-available", response_model=UsernameAvailability)
+@limiter.limit("30/minute")
+async def username_available(
+    request: Request, db: DbServiceDep, u: Annotated[str, Query(max_length=40)]
+) -> UsernameAvailability:
+    """Whether a @username can be taken, while it is typed (sign-up, "Meus dados").
+
+    Public: the sign-up has no session yet. It only says what every profile shows
+    anyway; the moderation runs when it is saved.
+    """
+    username = normalize_username(u)
+    problem = username_problem(username)
+    if problem is None:
+        taken, _ = await _username_holder(db, username)
+        if not taken:
+            return UsernameAvailability(available=True)
+        problem = "taken"
+    return UsernameAvailability(available=False, reason=problem, suggestion=await _suggestion(db, username))
+
+
+async def _suggestion(db: DbServiceDep, typed: str) -> str | None:
+    try:
+        return await db.generate_username(typed)
+    except Exception as exc:  # noqa: BLE001 — a suggestion is a nicety
+        logger.warning("Suggesting a username failed (%s)", type(exc).__name__)
+        return None
 
 
 # ------------------------------------------------------- e-mail code --

@@ -24,7 +24,7 @@ def _row(status: str, **extra: object) -> dict:
         "user_id": f"user-{status}",
         "status": status,
         "waitlist_position": None,
-        "profiles": {"id": f"user-{status}", "name": status.title(), "email": None},
+        "profiles": {"id": f"user-{status}", "username": status, "nickname": status.title(), "avatar_path": None},
     }
     row.update(extra)
     return row
@@ -99,8 +99,18 @@ def test_unlimited_event_reports_no_capacity() -> None:
 def test_bucket_attendees_carries_the_attendee_profile() -> None:
     out = bucket_attendees([_row("waitlisted", waitlist_position=2)], capacity=1)
 
-    assert out.waitlist[0].profile.name == "Waitlisted"
+    assert out.waitlist[0].profile.username == "waitlisted"
+    assert out.waitlist[0].profile.nickname == "Waitlisted"
     assert out.waitlist[0].waitlist_position == 2
+
+
+def test_bucket_attendees_uses_the_signed_photos() -> None:
+    row = _row("confirmed")
+    row["profiles"]["avatar_path"] = "user-confirmed/p.webp"
+
+    out = bucket_attendees([row], capacity=None, avatars={"user-confirmed/p.webp": "https://signed/p"})
+
+    assert out.confirmed[0].profile.avatar_url == "https://signed/p"
 
 
 def test_bucket_attendees_tolerates_a_missing_profile_join() -> None:
@@ -110,7 +120,7 @@ def test_bucket_attendees_tolerates_a_missing_profile_join() -> None:
     out = bucket_attendees([row], capacity=None)
 
     assert out.confirmed[0].profile.id == "user-confirmed"
-    assert out.confirmed[0].profile.name is None
+    assert out.confirmed[0].profile.username is None
 
 
 # ------------------------------------------------------------ queue depth --

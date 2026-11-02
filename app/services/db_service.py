@@ -13,6 +13,7 @@ import httpx
 
 from app.core.config import settings
 from app.core.errors import session_invalid
+from app.core.tz import parse_aware
 from app.models.schemas import ChatSender, EventMediaRead, FollowStatus, MediaType
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,8 @@ logger = logging.getLogger(__name__)
 REST_PREFIX = "/rest/v1"
 AUTH_PREFIX = "/auth/v1"
 STORAGE_PREFIX = "/storage/v1"
+# What other people see of someone (#32): never the name, e-mail, CPF or phone.
+PUBLIC_PROFILE_SELECT = "id,username,nickname,avatar_path"
 
 POSTGRES_UNIQUE_VIOLATION = "23505"
 
@@ -278,8 +281,8 @@ class DBService:
     # ------------------------------------------------ account: CPF and phone --
 
     @staticmethod
-    def _identity_filter(email: str | None, cpf: str, phone: str | None) -> str:
-        filters = [f"cpf.eq.{cpf}"]
+    def _identity_filter(email: str | None, cpf: str | None, phone: str | None) -> str:
+        filters = [f"cpf.eq.{cpf}"] if cpf else []
         if phone:
             filters.append(f"phone.eq.{phone}")
         if email:
@@ -290,7 +293,7 @@ class DBService:
         self,
         *,
         email: str | None,
-        cpf: str,
+        cpf: str | None,
         phone: str | None,
         exclude_user_id: str | None = None,
         active_only: bool = False,
@@ -316,7 +319,7 @@ class DBService:
         rows = r.json()
         taken: set[str] = set()
         for row in rows if isinstance(rows, list) else []:
-            if row.get("cpf") == cpf:
+            if cpf and row.get("cpf") == cpf:
                 taken.add("cpf")
             if phone and row.get("phone") == phone:
                 taken.add("phone")
@@ -324,7 +327,7 @@ class DBService:
                 taken.add("email")
         return taken
 
-    async def find_pending_signups(self, *, email: str | None, cpf: str, phone: str | None) -> list[str]:
+    async def find_pending_signups(self, *, email: str | None, cpf: str | None, phone: str | None) -> list[str]:
         """Ids of sign-ups still waiting for their code that use this e-mail, CPF or phone."""
         r = await self._client.get(
             f"{REST_PREFIX}/profiles",
@@ -347,7 +350,7 @@ class DBService:
             f"{REST_PREFIX}/profiles",
             params={
                 "id": f"eq.{user_id}",
-                "select": "cpf,phone,signup_pending,intro_seen_at,onboarding_preferences_hash",
+                "select": "cpf,phone,signup_pending,intro_seen_at,onboarding_preferences_hash,username,avatar_path",
                 "limit": "1",
             },
             headers=self._admin_headers(),
@@ -392,6 +395,86 @@ class DBService:
         await self._raise_for_supabase(r)
         rows = r.json()
         return isinstance(rows, list) and bool(rows)
+
+    # ---------------------------------------- "Meus dados" and the @username --
+
+    async def get_my_profile(self, user_id: str) -> dict[str, Any]:
+        """What the owner sees of their own account (#24). Never the taste keywords."""
+        r = await self._client.get(
+            f"{REST_PREFIX}/profiles",
+            params={
+                "id": f"eq.{user_id}",
+                "select": "name,username,username_changed_at,nickname,email,cpf,phone,avatar_path",
+                "limit": "1",
+            },
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        return dict(rows[0]) if isinstance(rows, list) and rows else {}
+
+    async def update_own_profile(self, user_id: str, data: dict[str, Any]) -> None:
+        """Write the owner's own fields. A repeated phone raises UniqueViolationError."""
+        r = await self._client.patch(
+            f"{REST_PREFIX}/profiles",
+            params={"id": f"eq.{user_id}"},
+            json=data,
+            headers={**self._admin_headers(), "Prefer": "return=minimal"},
+        )
+        await self._raise_for_supabase(r)
+
+    async def change_username(self, user_id: str, username: str, *, not_changed_since: datetime) -> bool:
+        """Set a new @username unless the person changed it after ``not_changed_since``.
+
+        The 30-day rule sits in the filter, so two changes at once cannot both pass.
+        False when it was changed too recently; a taken one raises UniqueViolationError.
+        """
+        r = await self._client.patch(
+            f"{REST_PREFIX}/profiles",
+            params={
+                "id": f"eq.{user_id}",
+                "or": f"(username_changed_at.is.null,username_changed_at.lt.{not_changed_since.isoformat()})",
+            },
+            json={"username": username, "username_changed_at": datetime.now(timezone.utc).isoformat()},
+            headers={**self._admin_headers(), "Prefer": "return=representation"},
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        return isinstance(rows, list) and bool(rows)
+
+    async def get_username_holder(self, username: str) -> dict[str, Any] | None:
+        """The account using this @username (`id`, `signup_pending`), if any."""
+        r = await self._client.get(
+            f"{REST_PREFIX}/profiles",
+            params={"username": f"eq.{username}", "select": "id,signup_pending", "limit": "1"},
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        return dict(rows[0]) if isinstance(rows, list) and rows else None
+
+    async def get_signup_ticket_created_at(self, user_id: str) -> datetime | None:
+        """When a pending sign-up got its ticket (None without one)."""
+        r = await self._client.get(
+            f"{REST_PREFIX}/signup_tickets",
+            params={"user_id": f"eq.{user_id}", "select": "created_at", "limit": "1"},
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+        rows = r.json()
+        if not isinstance(rows, list) or not rows:
+            return None
+        return parse_aware(rows[0].get("created_at"))
+
+    async def generate_username(self, name: str) -> str:
+        """A free @username made from ``name`` (the database's own rule)."""
+        r = await self._client.post(
+            f"{REST_PREFIX}/rpc/generate_username",
+            json={"full_name": name},
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
+        return str(r.json())
 
     async def _find_chat(self, user_id: str, jwt: str) -> str | None:
         r = await self._client.get(
@@ -668,13 +751,15 @@ class DBService:
             return data
         return []
 
-    async def sign_media_paths(self, paths: list[str], *, ttl: int | None = None) -> dict[str, str]:
+    async def sign_media_paths(
+        self, paths: list[str], *, ttl: int | None = None, bucket: str | None = None
+    ) -> dict[str, str]:
         """Map private Storage paths -> short-lived signed URLs (service_role).
 
         Values that are already absolute URLs (legacy `http(s)://` media) pass through
         unchanged. Paths that fail to sign are simply omitted (caller keeps the raw path).
         ``ttl`` (seconds) overrides ``MEDIA_SIGNED_URL_TTL_SECONDS``, e.g. for a URL
-        that only the moderation reads.
+        that only the moderation reads. ``bucket`` defaults to the event media one.
         """
         out: dict[str, str] = {}
         to_sign: list[str] = []
@@ -689,7 +774,7 @@ class DBService:
             return out
 
         r = await self._client.post(
-            f"{STORAGE_PREFIX}/object/sign/{settings.MEDIA_BUCKET}",
+            f"{STORAGE_PREFIX}/object/sign/{bucket or settings.MEDIA_BUCKET}",
             json={"expiresIn": ttl or settings.MEDIA_SIGNED_URL_TTL_SECONDS, "paths": to_sign},
             headers=self._admin_headers(),
         )
@@ -709,6 +794,18 @@ class DBService:
                     f"{base}{STORAGE_PREFIX}{signed_str}" if signed_str.startswith("/") else signed_str
                 )
         return out
+
+    async def delete_storage_objects(self, bucket: str, paths: list[str]) -> None:
+        """Delete files from a private bucket (service_role). Missing ones are ignored."""
+        if not paths:
+            return
+        r = await self._client.request(
+            "DELETE",
+            f"{STORAGE_PREFIX}/object/{bucket}",
+            json={"prefixes": paths},
+            headers=self._admin_headers(),
+        )
+        await self._raise_for_supabase(r)
 
     async def batch_fetch_event_media(
         self,
@@ -886,7 +983,7 @@ class DBService:
         joined = ",".join(profile_ids)
         r = await self._client.get(
             f"{REST_PREFIX}/profiles",
-            params={"id": f"in.({joined})", "select": "id,name"},
+            params={"id": f"in.({joined})", "select": PUBLIC_PROFILE_SELECT},
             headers=self._user_headers(jwt),
         )
         await self._raise_for_supabase(r)
@@ -925,7 +1022,7 @@ class DBService:
                     "following_id": str(row.get("following_id", "")),
                     "status": row.get("status"),
                     "created_at": row.get("created_at"),
-                    "follower_name": prof.get("name"),
+                    "follower": {"id": fid, **prof},
                 }
             )
         return result
@@ -969,13 +1066,7 @@ class DBService:
             return []
         ids = [str(row["following_id"]) for row in rows if row.get("following_id")]
         profiles = await self._fetch_profiles_batch(ids, jwt)
-        return [
-            {
-                "id": pid,
-                "name": profiles.get(pid, {}).get("name"),
-            }
-            for pid in ids
-        ]
+        return [{"id": pid, **profiles.get(pid, {})} for pid in ids]
 
     async def get_followers_list(self, user_id: str, jwt: str) -> list[dict[str, Any]]:
         r = await self._client.get(
@@ -993,13 +1084,7 @@ class DBService:
             return []
         ids = [str(row["follower_id"]) for row in rows if row.get("follower_id")]
         profiles = await self._fetch_profiles_batch(ids, jwt)
-        return [
-            {
-                "id": pid,
-                "name": profiles.get(pid, {}).get("name"),
-            }
-            for pid in ids
-        ]
+        return [{"id": pid, **profiles.get(pid, {})} for pid in ids]
 
     async def batch_fetch_events_by_ids(
         self,
@@ -1685,7 +1770,7 @@ class DBService:
             f"{REST_PREFIX}/event_rsvps",
             params={
                 "event_id": f"eq.{event_id}",
-                "select": "*,profiles(id,name)",
+                "select": f"*,profiles({PUBLIC_PROFILE_SELECT})",
                 "order": "waitlist_position.asc.nullslast,created_at.asc",
             },
             headers=self._user_headers(jwt),
@@ -1770,7 +1855,7 @@ class DBService:
         """Public profile of an attendee, to name them on the scanner screen."""
         r = await self._client.get(
             f"{REST_PREFIX}/profiles",
-            params={"id": f"eq.{user_id}", "select": "id,name", "limit": "1"},
+            params={"id": f"eq.{user_id}", "select": PUBLIC_PROFILE_SELECT, "limit": "1"},
             headers=self._user_headers(jwt),
         )
         await self._raise_for_supabase(r)

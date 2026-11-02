@@ -21,7 +21,6 @@ from app.core.limiter import limiter
 from app.core.request_context import route_of
 from app.models.schemas import (
     AttendeeListRead,
-    ProfileBrief,
     RsvpQrRequest,
     RsvpQrToken,
     RsvpRead,
@@ -36,6 +35,7 @@ from app.services.checkin_service import award_checkin_trophy, checkin_method
 from app.core.tz import LOCAL_TZ
 from app.services.checkin_window import checkin_state
 from app.services.db_service import RpcError, UniqueViolationError
+from app.services.public_profile import brief_from_row, display_label, public_profile, sign_avatars
 from app.services.rsvp_qr import AttendeePosition, issue_token, position_from_fix, verify_token
 
 logger = logging.getLogger(__name__)
@@ -100,22 +100,24 @@ def _row_to_rsvp(row: dict[str, Any], ahead_count: int | None = None) -> RsvpRea
     )
 
 
-def _row_to_rsvp_with_profile(row: dict[str, Any]) -> RsvpWithProfile:
+def _joined_profile(row: dict[str, Any]) -> dict[str, Any]:
     profile = row.get("profiles") or {}
     if isinstance(profile, list):
         profile = profile[0] if profile else {}
+    return profile
+
+
+def _row_to_rsvp_with_profile(row: dict[str, Any], avatars: dict[str, str] | None = None) -> RsvpWithProfile:
+    """``avatars``: the attendees' photos, signed beforehand in one call."""
     base = _row_to_rsvp(row)
     return RsvpWithProfile(
         **base.model_dump(),
-        profile=ProfileBrief(
-            id=str(profile.get("id") or row["user_id"]),
-            name=profile.get("name"),
-        ),
+        profile=brief_from_row(_joined_profile(row), avatars or {}, fallback_id=str(row["user_id"])),
     )
 
 
 def bucket_attendees(
-    rows: list[dict[str, Any]], capacity: Any
+    rows: list[dict[str, Any]], capacity: Any, avatars: dict[str, str] | None = None
 ) -> AttendeeListRead:
     """Split the queue into the sections the creator's screen shows.
 
@@ -137,7 +139,7 @@ def bucket_attendees(
             continue
         bucket = buckets.get(current)
         if bucket is not None:
-            bucket.append(_row_to_rsvp_with_profile(row))
+            bucket.append(_row_to_rsvp_with_profile(row, avatars))
 
     taken = (
         len(buckets[RsvpStatus.confirmed.value])
@@ -324,7 +326,8 @@ async def list_attendees(
     await db.sweep_expired_calls(event_id)
 
     rows = await db.get_event_rsvps(event_id, jwt)
-    return bucket_attendees(rows, event.get("capacity"))
+    avatars = await sign_avatars(db, (_joined_profile(row).get("avatar_path") for row in rows))
+    return bucket_attendees(rows, event.get("capacity"), avatars)
 
 
 @router.post("/{event_id}/waitlist/call-next", response_model=RsvpRead)
@@ -521,7 +524,7 @@ async def scan_ticket(
         raise _not_admissible(current_status)
 
     profile = await db.get_rsvp_profile(claims.user_id, jwt)
-    name = (profile.get("name") if profile else None) or "Participante"
+    name = display_label(profile)
     location_checked = _location_checked(
         event, claims.position, name, confirmed=body.confirm_without_location
     )
@@ -549,7 +552,7 @@ async def scan_ticket(
     return ScanResult(
         ok=True,
         status=RsvpStatus(str(row["status"])),
-        attendee=ProfileBrief(id=claims.user_id, name=profile.get("name") if profile else None),
+        attendee=await public_profile(db, profile, fallback_id=claims.user_id),
         trophy=trophy,
         location_checked=location_checked,
     )

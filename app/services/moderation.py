@@ -181,15 +181,16 @@ async def image_verdicts(urls: Sequence[str], *, concurrency: int = 8) -> list[V
     return list(await asyncio.gather(*(one(u) for u in urls)))
 
 
-async def path_verdicts(db: Any, paths: Sequence[str]) -> list[Verdict]:
-    """Images uploaded to the private bucket: signed for two minutes, just for the call.
+async def path_verdicts(db: Any, paths: Sequence[str], *, bucket: str | None = None) -> list[Verdict]:
+    """Images uploaded to a private bucket (the event media one unless ``bucket``):
+    signed for two minutes, just for the call.
 
     Storage leaves out what it cannot sign, a file that no longer exists: that image
     is ``missing`` (refused like an unreadable one, since trying again never helps).
     A signing request that fails raises ``ModerationUnavailable``.
     """
     try:
-        signed = await db.sign_media_paths(list(paths), ttl=_IMAGE_URL_TTL_SECONDS)
+        signed = await db.sign_media_paths(list(paths), ttl=_IMAGE_URL_TTL_SECONDS, bucket=bucket)
     except Exception as exc:
         logger.warning("Signing images for the moderation failed (%s)", type(exc).__name__)
         # No message: Storage URLs carry the user's folder.

@@ -67,7 +67,9 @@ def db() -> Iterator[MagicMock]:
     fake.get_rsvp = AsyncMock(return_value=RSVP)
     fake.sweep_expired_calls = AsyncMock()
     fake.rsvp_admit = AsyncMock(return_value={**RSVP, "status": "admitted"})
-    fake.get_rsvp_profile = AsyncMock(return_value={"id": "ana-1", "name": "Ana"})
+    fake.get_rsvp_profile = AsyncMock(
+        return_value={"id": "ana-1", "username": "ana.lima", "nickname": "Aninha", "avatar_path": None}
+    )
     fake.get_trophy_template_by_event = AsyncMock(return_value=TEMPLATE)
     fake.ensure_default_trophy_template = AsyncMock(return_value=TEMPLATE)
     fake.insert_trophy = AsyncMock(return_value={"id": "tr-1", "acquired_at": NOW.isoformat()})
@@ -129,7 +131,7 @@ def test_a_scan_admits_gives_the_trophy_and_tells_the_attendee(
     body = response.json()
     assert body["ok"] is True
     assert body["status"] == "admitted"
-    assert body["attendee"] == {"id": "ana-1", "name": "Ana"}
+    assert body["attendee"] == {"id": "ana-1", "username": "ana.lima", "nickname": "Aninha", "avatar_url": None}
     assert body["trophy"]["name"] == "Frevo!"
     assert body["location_checked"] is True
     db.rsvp_admit.assert_awaited_once()
@@ -255,7 +257,7 @@ def test_without_a_position_the_creator_is_asked_to_confirm(db: MagicMock, publi
 
     assert response.status_code == 409
     assert response.json()["code"] == "location_missing"
-    assert "Ana" in response.json()["detail"]
+    assert "Aninha (@ana.lima)" in response.json()["detail"]
     db.rsvp_admit.assert_not_called()
 
 

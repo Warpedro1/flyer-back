@@ -58,6 +58,8 @@ class Settings(BaseSettings):
 
     # Event media storage (private Supabase bucket; backend signs read URLs)
     MEDIA_BUCKET: str = "event-media"
+    # Profile photos (#24): private bucket, read through URLs the backend signs.
+    AVATAR_BUCKET: str = "avatars"
     # The app's address: where the links in Supabase Auth e-mails send people back to.
     APP_URL: str = "https://flyer-inky.vercel.app"
     MEDIA_SIGNED_URL_TTL_SECONDS: int = Field(default=3600, ge=60, le=86400)

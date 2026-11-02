@@ -148,7 +148,8 @@ async def test_attendee_list_is_ordered_by_queue_position() -> None:
     assert rows == [ROW]
     _args, kwargs = client.get.call_args
     assert kwargs["params"]["order"].startswith("waitlist_position.asc.nullslast")
-    assert "profiles(id,name)" in kwargs["params"]["select"]  # never the e-mail (#30)
+    # The public identity only: never the name or the e-mail (#30, #32).
+    assert "profiles(id,username,nickname,avatar_path)" in kwargs["params"]["select"]
 
 
 @pytest.mark.asyncio

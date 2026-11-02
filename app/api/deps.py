@@ -93,7 +93,7 @@ async def _account_state(request: Request, user_id: str) -> str:
 
 
 async def _authenticated_payload(
-    request: Request, token: str, *, require_profile: bool = True
+    request: Request, token: str, *, require_profile: bool = True, allow_incomplete: bool = False
 ) -> dict[str, Any]:
     """The validated JWT payload, after the account checks (decisions 2026-10-12).
 
@@ -106,7 +106,8 @@ async def _authenticated_payload(
        complete it on first access.
 
     Enforced here and not in the app: whoever has a token can call the API directly
-    and skip any screen.
+    and skip any screen. ``allow_incomplete`` lets an account without its CPF through
+    (step 3), never a pending sign-up (step 2).
     """
     payload = decode_access_token(token, settings.SUPABASE_JWT_SECRET)
     set_current_user(str(payload["sub"]))
@@ -118,7 +119,7 @@ async def _authenticated_payload(
         state = await _account_state(request, payload["sub"])
         if state == "pending":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=SIGNUP_PENDING)
-        if state != "ok":
+        if state != "ok" and not allow_incomplete:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=PROFILE_INCOMPLETE)
     return payload
 
@@ -184,6 +185,21 @@ async def get_current_user_pending_profile(
     (`tests/test_route_auth.py` refuses it anywhere else).
     """
     payload = await _authenticated_payload(request, credentials.credentials, require_profile=False)
+    return str(payload["sub"])
+
+
+async def get_current_user_incomplete_profile(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
+) -> str:
+    """Authenticate (with the e-mail code and an activated sign-up), CPF optional.
+
+    For "Meus dados" (`/auth/profile/*`, #24): an account still completing its CPF
+    uses the same screen. A pending sign-up stays out: whoever opened the session with
+    a code e-mailed by mistake must not read or change the account
+    (`tests/test_route_auth.py` refuses it outside `/auth/profile/*`).
+    """
+    payload = await _authenticated_payload(request, credentials.credentials, allow_incomplete=True)
     return str(payload["sub"])
 
 

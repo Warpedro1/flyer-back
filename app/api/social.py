@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from app.api.deps import DbServiceDep, get_current_user_with_token
 from app.models.schemas import FollowAction, FollowStatus, PendingFollowOut, ProfileBrief
 from app.services.db_service import UniqueViolationError
+from app.services.public_profile import public_profiles
 
 router = APIRouter(prefix="/social", tags=["social"])
 
@@ -41,18 +42,16 @@ async def list_follow_requests(
 ) -> list[PendingFollowOut]:
     user_id, jwt = auth
     rows = await db.get_pending_requests(user_id, jwt)
+    followers = await public_profiles(db, [r.get("follower") or {"id": r["follower_id"]} for r in rows])
     return [
         PendingFollowOut(
             follower_id=r["follower_id"],
             following_id=r["following_id"],
             status=FollowStatus(str(r["status"])),
             created_at=r.get("created_at"),
-            follower=ProfileBrief(
-                id=r["follower_id"],
-                name=r.get("follower_name"),
-            ),
+            follower=follower,
         )
-        for r in rows
+        for r, follower in zip(rows, followers, strict=True)
     ]
 
 
@@ -88,8 +87,7 @@ async def list_following(
     auth: Annotated[tuple[str, str], Depends(get_current_user_with_token)],
 ) -> list[ProfileBrief]:
     user_id, jwt = auth
-    rows = await db.get_following_list(user_id, jwt)
-    return [ProfileBrief(id=r["id"], name=r.get("name")) for r in rows]
+    return await public_profiles(db, await db.get_following_list(user_id, jwt))
 
 
 @router.get("/followers", response_model=list[ProfileBrief])
@@ -98,8 +96,7 @@ async def list_followers(
     auth: Annotated[tuple[str, str], Depends(get_current_user_with_token)],
 ) -> list[ProfileBrief]:
     user_id, jwt = auth
-    rows = await db.get_followers_list(user_id, jwt)
-    return [ProfileBrief(id=r["id"], name=r.get("name")) for r in rows]
+    return await public_profiles(db, await db.get_followers_list(user_id, jwt))
 
 
 @router.get("/health")

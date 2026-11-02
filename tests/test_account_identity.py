@@ -191,6 +191,8 @@ def test_status_shows_the_owner_masked_data(db: MagicMock) -> None:
         "phone_masked": "(81) 9****-5678",
         "intro_seen": False,
         "onboarded": False,
+        "username": None,
+        "avatar_url": None,
     }
 
 
@@ -205,6 +207,8 @@ def test_status_of_an_incomplete_account(db: MagicMock) -> None:
         "phone_masked": None,
         "intro_seen": False,
         "onboarded": False,
+        "username": None,
+        "avatar_url": None,
     }
 
 

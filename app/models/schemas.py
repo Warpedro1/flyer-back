@@ -297,14 +297,17 @@ class FollowRead(BaseModel):
 class ProfileBrief(BaseModel):
     """What one user sees of another: followers, requests, attendees, the scanner.
 
-    Never the e-mail (#30, privacy): the creator of an event saw the address of
-    everyone going. The public @username and nickname come with #32.
+    The public identity (#32, decisions 2026-11-01): @username, nickname and photo
+    (a short-lived signed URL). Never the name, e-mail, CPF or phone: the creator of an
+    event saw the address of everyone going (#30). Built by `services/public_profile.py`.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    name: str | None = None
+    username: str | None = None
+    nickname: str | None = None
+    avatar_url: str | None = None
 
 
 class FollowAction(BaseModel):
@@ -758,6 +761,10 @@ class SignupIn(BaseModel):
     cpf: str = Field(max_length=20)
     phone: str | None = Field(default=None, max_length=25)
     password: str = Field(max_length=72)
+    # The public identity (#32). Optional: the app before it sends none, and the
+    # database makes a @username from the name. Checked in the route (moderation).
+    username: str | None = Field(default=None, max_length=40)
+    nickname: str | None = Field(default=None, max_length=200)
 
     @field_validator("name")
     @classmethod
@@ -838,6 +845,96 @@ class ProfileIdentityStatus(BaseModel):
     # the chat onboarding was done (the tour ends there otherwise).
     intro_seen: bool = False
     onboarded: bool = False
+    # The owner's public identity, for the menu (#32).
+    username: str | None = None
+    avatar_url: str | None = None
+
+
+class MyProfileRead(BaseModel):
+    """ "Meus dados" (#24): what the owner sees of their own account. CPF and phone
+    masked; never the taste keywords (decision 2026-11-01)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Private: only the owner sees it.
+    name: str | None = None
+    username: str
+    # When the @username may change again; null = now (#32: once every 30 days).
+    username_change_available_at: datetime | None = None
+    nickname: str | None = None
+    email: str | None = None
+    cpf_masked: str | None = None
+    phone_masked: str | None = None
+    avatar_url: str | None = None
+    # Has a CPF: the account may use the whole app.
+    complete: bool
+
+
+class NameIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(max_length=100)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v: str) -> str:
+        name = v.strip()
+        if not name:
+            raise ValueError("Informe seu nome.")
+        return name
+
+
+class UsernameIn(BaseModel):
+    """Checked in the route, which says why one is refused."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(max_length=40)
+
+
+class NicknameIn(BaseModel):
+    """Empty or null removes it. Checked in the route (moderation)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    nickname: str | None = Field(default=None, max_length=200)
+
+
+class PhoneIn(BaseModel):
+    """Empty or null removes it (the phone is optional, #29)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    phone: str | None = Field(default=None, max_length=25)
+
+    @field_validator("phone")
+    @classmethod
+    def _phone(cls, v: str | None) -> str | None:
+        return _valid_phone(v)
+
+
+class AvatarIn(BaseModel):
+    """A photo the app uploaded to the avatars bucket (`{uid}/{uuid}.ext`)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=200)
+
+
+class AvatarRead(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    avatar_url: str | None = None
+
+
+class UsernameAvailability(BaseModel):
+    """Whether a @username can be taken, and why not (with one that can)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    available: bool
+    reason: Literal["invalid", "reserved", "taken"] | None = None
+    suggestion: str | None = None
 
 
 class EmailCodeStatus(BaseModel):
