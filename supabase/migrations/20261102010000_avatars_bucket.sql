@@ -3,7 +3,8 @@
 -- The app resizes the photo to 512×512 in the browser and uploads it with the person's
 -- own session into avatars/{uid}/{uuid}.ext; the backend checks the path, moderates the
 -- image and only then stores it in profiles.avatar_path. Every logged-in user sees the
--- photo, always through a short-lived URL the backend signs (no SELECT policy here).
+-- photo, always through a short-lived URL the backend signs: a person reads directly
+-- only their own folder.
 -- Kept apart from 20261102000000_public_identity because the integration tests have no
 -- `storage` schema.
 
@@ -35,4 +36,10 @@ create policy "avatars_delete_own"
 on storage.objects for delete to authenticated
 using (bucket_id = 'avatars' and (storage.foldername(name))[1] = (select auth.uid())::text);
 
--- NO SELECT policy on purpose: photos are read only through URLs signed by the backend.
+-- A DELETE with a WHERE only reaches the rows a SELECT policy lets it see: without this
+-- one, the app's cleanup of an upload the API did not use would delete nothing. Own
+-- folder only: other people's photos are still read only through URLs the backend signs.
+drop policy if exists "avatars_select_own" on storage.objects;
+create policy "avatars_select_own"
+on storage.objects for select to authenticated
+using (bucket_id = 'avatars' and (storage.foldername(name))[1] = (select auth.uid())::text);
