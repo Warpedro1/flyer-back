@@ -469,6 +469,15 @@ class DBService:
             return None
         return parse_aware(rows[0].get("created_at"))
 
+    async def get_auth_user_created_at(self, user_id: str) -> datetime | None:
+        """When the account was created in Supabase Auth; None when it no longer exists."""
+        r = await self._client.get(f"{AUTH_PREFIX}/admin/users/{user_id}", headers=self._admin_headers())
+        if r.status_code == 404:
+            return None
+        await self._raise_for_supabase(r)
+        body = r.json() if r.content else {}
+        return parse_aware(body.get("created_at")) if isinstance(body, dict) else None
+
     async def generate_username(self, name: str) -> str:
         """A free @username made from ``name`` (the database's own rule)."""
         r = await self._client.post(

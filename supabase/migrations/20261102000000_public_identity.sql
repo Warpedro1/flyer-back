@@ -2,12 +2,15 @@
 -- 2026-11-01).
 --
 -- What other people see of someone is their @username, nickname and photo; the full
--- name stays private. Every profile gets a unique @username made from the full name
--- (`pedro.guerra`, with digits when taken), the accounts that already existed too; the
--- person changes it later (once every 30 days, enforced by the backend through
--- `username_changed_at`). The @username and nickname chosen at sign-up are written by
--- the backend after its moderation, never taken from the sign-up metadata: whoever
--- calls Supabase Auth directly with the publishable key would skip it.
+-- name stays private. Every profile has a unique @username:
+-- * the accounts that already existed get one made from the full name (`pedro.guerra`,
+--   with digits when taken);
+-- * a new account starts with a neutral one (`usuario` + 6 digits). The backend replaces
+--   it with the one the person chose, or with one made from the name, only after its
+--   moderation and personal-data checks: a name, like the sign-up metadata, reaches
+--   Supabase Auth unchecked (Google, or whoever calls Auth with the publishable key).
+-- The person changes it later (once every 30 days, enforced by the backend through
+-- `username_changed_at`). The nickname is written by the backend too.
 --
 -- `profiles.email` now follows the e-mail of the account in Auth, which the e-mail
 -- change of "Meus dados" relies on. Backend only: no grants for clients. No DROP.
@@ -27,8 +30,9 @@ comment on column public.profiles.nickname is
 comment on column public.profiles.avatar_path is
   'Foto de perfil no bucket avatars ({uid}/{uuid}.ext); lida só por URL assinada.';
 
--- A name is reserved when any of its pieces between dots, underscores and digits is one
--- of these words (`flyer1`, `admin_br`). Kept equal to app/core/usernames.py by a test.
+-- A name is reserved when any of its pieces between dots, underscores and digits is made
+-- only of these words (`flyer1`, `admin_br`, `suporteflyer`; not `flyerzinho`). Kept
+-- equal to app/core/usernames.py by a test.
 -- Tag própria ($fn$) e não $$: o SQL Editor do Supabase parte o script em comandos.
 create or replace function public.is_reserved_username(value text)
 returns boolean
@@ -39,15 +43,15 @@ as $fn$
   select exists (
     select 1
       from regexp_split_to_table(lower(coalesce(value, '')), '[._0-9]+') as piece
-     where piece = any (array[
+     where piece ~ ('^(' || array_to_string(array[
        'admin', 'flyer', 'suporte', 'ajuda', 'contato', 'oficial', 'equipe', 'moderacao',
        'sistema', 'seguranca', 'root', 'api', 'www', 'null'
-     ]::text[])
+     ]::text[], '|') || ')+$')
   );
 $fn$;
 
 -- 3 to 20 of [a-z0-9._], not starting or ending with a dot, no "..", at least one letter,
--- at most 7 digits in a row (no phone or CPF fits) and not reserved.
+-- at most 7 digits in all (no phone or CPF fits, however split) and not reserved.
 create or replace function public.is_valid_username(value text)
 returns boolean
 language sql
@@ -58,14 +62,13 @@ as $fn$
      and value ~ '^[a-z0-9_][a-z0-9._]{1,18}[a-z0-9_]$'
      and value !~ '\.\.'
      and value ~ '[a-z]'
-     and value !~ '[0-9]{8}'
+     and value !~ '([0-9][^0-9]*){8}'
      and not public.is_reserved_username(value);
 $fn$;
 
--- A free @username made from a full name: lower case, without accents, words joined by
--- dots, at most 15 characters, plus digits when taken (after a `_` when the name already
--- ends in digits). `usuario` when the name gives nothing usable (empty, too short, no
--- letter, only emoji or other scripts, reserved).
+-- A free @username made from a full name: lower case, without accents or digits, words
+-- joined by dots, at most 15 characters, plus 2 to 4 digits when taken. `usuario` when
+-- the name gives nothing usable (empty, too short, only emoji or other scripts, reserved).
 create or replace function public.generate_username(full_name text)
 returns text
 language plpgsql
@@ -81,7 +84,7 @@ begin
     'áàâãäåéèêëíìîïóòôõöúùûüçñýÿ',
     'aaaaaaeeeeiiiiooooouuuucnyy'
   );
-  base := btrim(regexp_replace(base, '[^a-z0-9]+', '.', 'g'), '.');
+  base := btrim(regexp_replace(base, '[^a-z]+', '.', 'g'), '.');
   base := rtrim(left(base, 15), '.');
   if not public.is_valid_username(base) then
     base := 'usuario';
@@ -93,21 +96,40 @@ begin
        and not exists (select 1 from public.profiles where username = candidate) then
       return candidate;
     end if;
-    candidate := base
-      || case when base ~ '[0-9]$' then '_' else '' end
-      || case
-           when attempt <= 10 then (10 + floor(random() * 90))::int::text
-           else (1000 + floor(random() * 9000))::int::text
-         end;
+    candidate := base || case
+      when attempt <= 10 then (10 + floor(random() * 90))::int::text
+      else (1000 + floor(random() * 9000))::int::text
+    end;
   end loop;
   return 'usuario' || lpad(floor(random() * 1000000)::int::text, 6, '0');
 end;
 $fn$;
 
+-- A free neutral @username for a new account: `usuario` + 6 digits.
+create or replace function public.neutral_username()
+returns text
+language plpgsql
+volatile
+set search_path = ''
+as $fn$
+declare
+  candidate text;
+begin
+  for attempt in 1..30 loop
+    candidate := 'usuario' || lpad(floor(random() * 1000000)::int::text, 6, '0');
+    if not exists (select 1 from public.profiles where username = candidate) then
+      return candidate;
+    end if;
+  end loop;
+  raise exception 'no free neutral username';
+end;
+$fn$;
+
 create unique index if not exists profiles_username_key on public.profiles (username);
 
--- Any profile inserted without a username gets one: every new account (the Auth
--- trigger below) and the backend's get_or_create_profile, which inserts only the id.
+-- Any profile inserted without a username gets a neutral one: every new account (the
+-- Auth trigger below) and the backend's get_or_create_profile, which inserts only the
+-- id. Never one made from the name here: the name was not moderated.
 create or replace function public.profiles_fill_username()
 returns trigger
 language plpgsql
@@ -115,7 +137,7 @@ set search_path = ''
 as $fn$
 begin
   if new.username is null then
-    new.username := public.generate_username(new.name);
+    new.username := public.neutral_username();
   end if;
   return new;
 end;
@@ -126,8 +148,8 @@ create or replace trigger profiles_fill_username
   for each row execute function public.profiles_fill_username();
 
 -- Same body as 20261016000000; the username comes from profiles_fill_username. Two
--- sign-ups with the same name at once: the one whose username is taken while it waits
--- tries again and gets another. A clash on the CPF or the phone still fails the sign-up
+-- sign-ups that draw the same neutral username at once: the one whose username is
+-- taken while it waits tries again and gets another. A clash on the CPF or the phone still fails the sign-up
 -- (the backend answers 409).
 create or replace function public.handle_new_user()
 returns trigger
@@ -219,9 +241,11 @@ alter table public.profiles
 revoke execute on function public.is_reserved_username(text) from public, anon, authenticated;
 revoke execute on function public.is_valid_username(text) from public, anon, authenticated;
 revoke execute on function public.generate_username(text) from public, anon, authenticated;
+revoke execute on function public.neutral_username() from public, anon, authenticated;
 revoke execute on function public.profiles_fill_username() from public, anon, authenticated;
 revoke execute on function public.handle_new_user() from public, anon, authenticated;
 revoke execute on function public.sync_profile_email() from public, anon, authenticated;
 grant execute on function public.is_reserved_username(text) to service_role;
 grant execute on function public.is_valid_username(text) to service_role;
 grant execute on function public.generate_username(text) to service_role;
+grant execute on function public.neutral_username() to service_role;

@@ -63,6 +63,8 @@ def db() -> Iterator[MagicMock]:
     fake.change_username = AsyncMock(return_value=True)
     fake.get_username_holder = AsyncMock(return_value=None)
     fake.get_signup_ticket_created_at = AsyncMock(return_value=None)
+    # A ticketless pending sign-up was created just now (its ticket is on the way).
+    fake.get_auth_user_created_at = AsyncMock(return_value=datetime.now(timezone.utc))
     fake.delete_auth_user = AsyncMock()
     fake.generate_username = AsyncMock(return_value="ana.lima42")
     fake.find_identity_conflicts = AsyncMock(return_value=set())
@@ -365,6 +367,10 @@ def test_an_empty_nickname_removes_it(db: MagicMock, value: str | None) -> None:
         ("Moderação", "nickname_reserved"),
         ("Fl\u200byer", "nickname_invalid"),
         ("\u202enimda", "nickname_invalid"),
+        ("\u0410dmin", "nickname_invalid"),
+        ("\u3164", "nickname_invalid"),
+        ("...", "nickname_invalid"),
+        ("Flyer™", "nickname_reserved"),
         ("Ana 81 99999-8888", "personal_data"),
         ("x" * 41, "nickname_too_long"),
     ],
@@ -431,6 +437,38 @@ def test_an_invalid_phone_is_refused(db: MagicMock) -> None:
     response = _client().put("/auth/profile/phone", json={"phone": "1234"}, headers=AUTH)
 
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("current", "adopted"),
+    [("usuario123456", {"username": "ana.lima42"}), ("ana.escolhido", None)],
+)
+def test_completing_the_cpf_turns_a_neutral_username_into_one_from_the_name(
+    db: MagicMock, current: str, adopted: dict[str, str] | None
+) -> None:
+    # Google accounts reach the backend first here: their name was never checked.
+    db.get_account_state.return_value = "incomplete"
+    db.complete_profile_identity = AsyncMock(return_value=True)
+    db.get_my_profile.return_value = {**PROFILE, "username": current, "cpf": None}
+
+    response = _client().put("/auth/profile/identity", json={"cpf": "529.982.247-25"}, headers=AUTH)
+
+    assert response.status_code == 204
+    if adopted:
+        db.update_own_profile.assert_awaited_once_with(USER, adopted)
+    else:
+        db.update_own_profile.assert_not_awaited()
+
+
+def test_a_failure_choosing_the_name_username_never_fails_the_cpf_step(db: MagicMock) -> None:
+    db.get_account_state.return_value = "incomplete"
+    db.complete_profile_identity = AsyncMock(return_value=True)
+    db.get_my_profile.return_value = {**PROFILE, "username": "usuario123456"}
+    db.update_own_profile.side_effect = UniqueViolationError()
+
+    response = _client().put("/auth/profile/identity", json={"cpf": "529.982.247-25"}, headers=AUTH)
+
+    assert response.status_code == 204
 
 
 def test_a_cpf_taken_in_a_race_is_a_conflict_not_a_crash(db: MagicMock) -> None:
@@ -567,14 +605,26 @@ def test_a_forgotten_pending_sign_up_does_not_hold_a_username(db: MagicMock) -> 
 
 
 def test_a_sign_up_still_being_created_holds_its_username(db: MagicMock) -> None:
-    # Between the account and its ticket there is no ticket yet: never "forgotten".
+    # Between the account and its ticket there is no ticket yet: not "forgotten".
     db.get_username_holder.return_value = {"id": "pending-1", "signup_pending": True}
     db.get_signup_ticket_created_at.return_value = None
+    db.get_auth_user_created_at.return_value = datetime.now(timezone.utc) - timedelta(minutes=2)
 
     body = TestClient(app).get("/auth/username-available", params={"u": "ana.lima"}).json()
 
     assert body["available"] is False
     assert body["reason"] == "taken"
+
+
+@pytest.mark.parametrize("created", [timedelta(minutes=30), None])
+def test_a_sign_up_that_never_got_its_ticket_gives_the_username_away(db: MagicMock, created: timedelta | None) -> None:
+    db.get_username_holder.return_value = {"id": "pending-1", "signup_pending": True}
+    db.get_signup_ticket_created_at.return_value = None
+    db.get_auth_user_created_at.return_value = datetime.now(timezone.utc) - created if created else None
+
+    body = TestClient(app).get("/auth/username-available", params={"u": "ana.lima"}).json()
+
+    assert body["available"] is True
 
 
 # ------------------------------------------------------------------ sign-up --
@@ -632,13 +682,34 @@ def test_signing_up_again_keeps_the_username_of_the_sign_up_it_replaces(signup_d
     signup_db.delete_auth_user.assert_awaited_once_with("pending-1")
 
 
-def test_sign_up_without_a_username_still_works(signup_db: MagicMock) -> None:
-    # The app before #32 sends none: the database makes one from the name.
+def test_sign_up_without_a_username_gets_one_from_the_name_after_the_checks(signup_db: MagicMock) -> None:
+    # The app before #32 sends none: the account starts neutral and gets one made from
+    # the name once it passes the same checks as a chosen one.
     response = TestClient(app).post("/auth/signup", json=SIGNUP)
 
     assert response.status_code == 201
     assert "username" not in signup_db.signup_user.await_args.kwargs["data"]
-    signup_db.get_username_holder.assert_not_awaited()
+    signup_db.generate_username.assert_awaited_once_with("Ana Lima")
+    signup_db.update_own_profile.assert_awaited_once_with("user-9", {"username": "ana.lima42"})
+
+
+def test_a_name_the_moderation_refuses_never_becomes_the_username(
+    signup_db: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    signup_db.generate_username.return_value = "palavrao.feio"
+    monkeypatch.setattr(ai_service, "moderate_inputs", _says({"palavrao": ["harassment"]}))
+
+    response = TestClient(app).post("/auth/signup", json={**SIGNUP, "name": "Palavrão Feio"})
+
+    assert response.status_code == 201
+    signup_db.update_own_profile.assert_not_awaited()
+
+
+def test_a_name_that_gives_no_username_keeps_the_neutral_one(signup_db: MagicMock) -> None:
+    signup_db.generate_username.return_value = "usuario"
+
+    TestClient(app).post("/auth/signup", json={**SIGNUP, "name": "😀"})
+
     signup_db.update_own_profile.assert_not_awaited()
 
 

@@ -1,10 +1,10 @@
 """@username, nickname and photo on profiles (migration 20261102000000, #32 and #24).
 
-Decisions 2026-11-01: every profile has a unique @username made from the full name
-(accounts that existed too), the nickname is optional, and neither comes from the
-sign-up metadata (the backend writes the chosen ones after its moderation; whoever calls
-Supabase Auth directly would skip it). `profiles.email` follows the e-mail of the
-account in Auth.
+Decisions 2026-11-01: every profile has a unique @username. The accounts that existed
+get one made from the full name; a new account starts with a neutral one (`usuario` + 6
+digits) that the backend replaces after its moderation (neither the name nor the sign-up
+metadata is checked before reaching Supabase Auth). The nickname is optional and never
+comes from the metadata. `profiles.email` follows the e-mail of the account in Auth.
 """
 
 from __future__ import annotations
@@ -71,26 +71,30 @@ def _username(conn: Any, user_id: str) -> str:
     return _profile(conn, user_id)[0]
 
 
-def test_a_sign_up_gets_a_username_from_its_name(db: Any) -> None:
+NEUTRAL = re.compile(r"usuario\d{6}")
+
+
+def test_a_sign_up_starts_with_a_neutral_username(db: Any) -> None:
     user = _signup(db, "ana@example.com", {"name": "Ana Beatriz", "flyer_signup": True})
 
-    assert _profile(db, user) == ("ana.beatriz", None, None, None)
+    username, changed_at, nickname, avatar = _profile(db, user)
+    assert NEUTRAL.fullmatch(username)
+    assert (changed_at, nickname, avatar) == (None, None, None)
 
 
-@pytest.mark.parametrize("wanted", ["ana.bia", "palavrao.feio", "A!", "flyer1"])
-def test_a_username_in_the_metadata_is_ignored(db: Any, wanted: str) -> None:
-    # Whoever calls Supabase Auth directly would skip the backend's moderation.
-    user = _signup(db, "ana@example.com", {"name": "Ana Lima", "username": wanted})
+@pytest.mark.parametrize("meta", [{"name": "Palavrão Feio"}, {"full_name": "Pedro Guerra"}, {"username": "ana.bia"}])
+def test_neither_the_name_nor_the_metadata_makes_the_username(db: Any, meta: dict[str, str]) -> None:
+    # Neither was moderated: the backend sets the real one after its checks.
+    user = _signup(db, "ana@example.com", meta)
 
-    assert _username(db, user) == "ana.lima"
+    assert NEUTRAL.fullmatch(_username(db, user))
 
 
-def test_google_accounts_get_a_username_from_the_full_name(db: Any) -> None:
-    first = _signup(db, "p1@example.com", {"full_name": "Pedro Guerra"})
-    second = _signup(db, "p2@example.com", {"full_name": "Pedro Guerra"})
+def test_neutral_usernames_are_valid_and_different(db: Any) -> None:
+    names = [_username(db, _signup(db, f"u{i}@example.com", {"full_name": "Bia"})) for i in range(5)]
 
-    assert _username(db, first) == "pedro.guerra"
-    assert re.fullmatch(r"pedro\.guerra\d{2,4}", _username(db, second))
+    assert len(set(names)) == 5
+    assert all(NEUTRAL.fullmatch(n) and username_problem(n) is None for n in names)
 
 
 @pytest.mark.parametrize(
@@ -111,8 +115,10 @@ def test_google_accounts_get_a_username_from_the_full_name(db: Any) -> None:
         ("José da Silva Xavier Pereira", "jose.da.silva.x"),
         ("x" * 100, "x" * 15),
         ("2026", "usuario"),
-        ("Ana 81999998888", "usuario"),
-        ("Turma 2026", "turma.2026"),
+        ("Ana 81999998888", "ana"),
+        ("Turma 2026", "turma"),
+        ("Suporte Flyer", "usuario"),
+        ("Flyer Oficial", "usuario"),
     ],
 )
 def test_generated_usernames(db: Any, name: str | None, expected: str) -> None:
@@ -122,21 +128,15 @@ def test_generated_usernames(db: Any, name: str | None, expected: str) -> None:
     assert username_problem(generated) is None
 
 
-def test_digits_added_to_a_name_ending_in_digits_come_after_an_underscore(db: Any) -> None:
-    first = _signup(db, "t1@example.com", {"name": "Turma 1234567"})
-    second = _signup(db, "t2@example.com", {"name": "Turma 1234567"})
-
-    assert _username(db, first) == "turma.1234567"
-    assert re.fullmatch(r"turma\.1234567_\d{2,4}", _username(db, second))
-
-
 def test_the_generator_never_returns_a_taken_username(db: Any) -> None:
-    users = [_signup(db, f"u{i}@example.com", {"full_name": "Bia"}) for i in range(5)]
+    users = [_signup(db, f"u{i}@example.com", {}) for i in range(5)]
+    for user in users:
+        db.execute("update public.profiles set username = public.generate_username('Bia') where id = %s", (user,))
 
     names = [_username(db, u) for u in users]
     assert len(set(names)) == 5
     assert names[0] == "bia"
-    assert all(username_problem(n) is None for n in names)
+    assert all(re.fullmatch(r"bia(\d{2,4})?", n) and username_problem(n) is None for n in names)
 
 
 def test_the_nickname_never_comes_from_the_metadata(db: Any) -> None:
@@ -154,7 +154,7 @@ def test_a_profile_inserted_without_a_username_gets_one(db: Any) -> None:
 
     db.execute("insert into public.profiles (id, name) values (%s, 'Bia Lima')", (user,))
 
-    assert _username(db, user) == "bia.lima"
+    assert NEUTRAL.fullmatch(_username(db, user))
 
 
 def test_existing_profiles_get_a_username_and_their_email_from_auth(empty_db: Any, migrate: Callable[..., None]) -> None:
@@ -185,6 +185,8 @@ def test_two_sign_ups_racing_for_the_same_username_both_succeed(db: Any) -> None
     first_id = str(uuid.uuid4())
     meta = json.dumps({"name": "Ana Souza"})
     with psycopg.connect(url) as first:
+        # The same seed in both sessions draws the same neutral username first.
+        first.execute("select setseed(0.42)")
         first.execute(
             "insert into auth.users (id, email, raw_user_meta_data) values (%s, 'a1@example.com', %s::jsonb)",
             (first_id, meta),
@@ -196,6 +198,7 @@ def test_two_sign_ups_racing_for_the_same_username_both_succeed(db: Any) -> None
         def second_sign_up() -> None:
             try:
                 with psycopg.connect(url, autocommit=True) as second:
+                    second.execute("select setseed(0.42)")
                     result["id"] = _signup(second, "a2@example.com", {"name": "Ana Souza"})
             except Exception as exc:  # noqa: BLE001
                 result["error"] = exc
@@ -208,8 +211,9 @@ def test_two_sign_ups_racing_for_the_same_username_both_succeed(db: Any) -> None
         worker.join(timeout=10)
 
     assert "error" not in result, result.get("error")
-    assert _username(db, first_id) == "ana.souza"
-    assert re.fullmatch(r"ana\.souza\d{2,4}", _username(db, result["id"]))
+    first_name, second_name = _username(db, first_id), _username(db, result["id"])
+    assert NEUTRAL.fullmatch(first_name) and NEUTRAL.fullmatch(second_name)
+    assert first_name != second_name
 
 
 def test_a_cpf_clash_still_fails_the_sign_up(db: Any) -> None:
@@ -264,8 +268,9 @@ def test_the_username_cannot_be_removed(db: Any) -> None:
 
 
 def test_usernames_are_unique(db: Any) -> None:
-    _signup(db, "a1@example.com", {"name": "Ana"})
+    first = _signup(db, "a1@example.com", {"name": "Ana"})
     other = _signup(db, "a2@example.com", {"name": "Bia"})
+    db.execute("update public.profiles set username = 'ana' where id = %s", (first,))
 
     with pytest.raises(psycopg.errors.UniqueViolation):
         db.execute("update public.profiles set username = 'ana' where id = %s", (other,))
@@ -285,6 +290,8 @@ PROBES = [
     "ab", "a" * 20, "a" * 21, ".ana", "ana.", "ana..b", "81999998888", "ana2026", "_ana_", "null",
     "www.ana", "equipe.azul", "seguranca", "sistema9", "root_", "api.x", "contatos",
     "ana81999998888", "a52998224725", "ana1234567", "12345678ab",
+    "suporteflyer", "flyeroficial", "adminflyer", "flyerzinho", "administrador", "apiroot",
+    "a529.982.247.25", "a81.999.998.888", "a8199.999.8888", "turma.2026.2027", "copa.2014", "usuario123456",
 ]
 
 
@@ -298,7 +305,14 @@ def test_sql_and_python_agree(db: Any, probe: str) -> None:
     assert reserved is is_reserved_username(probe)
 
 
-FUNCTIONS = ("is_reserved_username", "is_valid_username", "generate_username", "profiles_fill_username", "sync_profile_email")
+FUNCTIONS = (
+    "is_reserved_username",
+    "is_valid_username",
+    "generate_username",
+    "neutral_username",
+    "profiles_fill_username",
+    "sync_profile_email",
+)
 
 
 @pytest.mark.parametrize("role", ["anon", "authenticated"])
@@ -313,7 +327,7 @@ def test_clients_cannot_call_the_functions(db: Any, role: str, function: str) ->
     assert allowed is False
 
 
-@pytest.mark.parametrize("function", ["is_reserved_username", "is_valid_username", "generate_username"])
+@pytest.mark.parametrize("function", ["is_reserved_username", "is_valid_username", "generate_username", "neutral_username"])
 def test_the_backend_can_call_the_username_functions(db: Any, function: str) -> None:
     allowed = db.execute(
         "select has_function_privilege('service_role', p.oid, 'execute') from pg_proc p "

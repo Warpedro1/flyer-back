@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
@@ -47,6 +48,8 @@ from app.core.tz import LOCAL_TZ, parse_aware
 from app.core.usernames import (
     NICKNAME_MAX_LENGTH,
     has_hidden_characters,
+    has_visible_text,
+    mixes_scripts,
     normalize_username,
     username_problem,
     uses_authority_word,
@@ -102,12 +105,17 @@ _TAKEN_ORDER = ("email", "cpf", "phone", "username")
 # The @username changes once every 30 days (decision 2026-11-01).
 USERNAME_CHANGE_INTERVAL = timedelta(days=30)
 # A sign-up that waited longer than its ticket (24 h in the app) will never be
-# finished: it no longer holds its @username.
+# finished: it no longer holds its @username. Without a ticket it is either being
+# created (the ticket comes right after) or its creation failed halfway.
 STALE_SIGNUP_AFTER = timedelta(hours=24)
+TICKETLESS_SIGNUP_GRACE = timedelta(minutes=10)
+# What a new account starts with (migration public_identity): replaced by one made from
+# the name only after the checks below.
+NEUTRAL_USERNAME = re.compile(r"usuario\d{6}")
 
 USERNAME_TAKEN_MESSAGE = _TAKEN["username"] + " Escolha outro."
 USERNAME_RULE_MESSAGE = (
-    "Use de 3 a 20 letras minúsculas sem acento, números (até 7 seguidos), ponto ou _, com "
+    "Use de 3 a 20 letras minúsculas sem acento, números (até 7 no total), ponto ou _, com "
     "pelo menos uma letra e sem ponto no começo, no fim ou repetido."
 )
 
@@ -126,12 +134,16 @@ def _ticket_hash(ticket: str) -> str:
 
 
 async def _forgotten_sign_up(db: DbServiceDep, holder: dict[str, Any]) -> bool:
-    """A pending sign-up whose ticket is older than its lifetime can never be finished.
-    Without a ticket it is still being created (the ticket comes right after)."""
+    """A pending sign-up whose ticket is older than its lifetime can never be finished;
+    one without a ticket neither, once it is older than the time its creation takes."""
     if not holder.get("signup_pending"):
         return False
-    created = await db.get_signup_ticket_created_at(str(holder["id"]))
-    return created is not None and _now() - created > STALE_SIGNUP_AFTER
+    holder_id = str(holder["id"])
+    ticket_created = await db.get_signup_ticket_created_at(holder_id)
+    if ticket_created is not None:
+        return _now() - ticket_created > STALE_SIGNUP_AFTER
+    account_created = await db.get_auth_user_created_at(holder_id)
+    return account_created is None or _now() - account_created > TICKETLESS_SIGNUP_GRACE
 
 
 async def _username_holder(
@@ -206,8 +218,12 @@ def _nickname_value(raw: str | None) -> str | None:
         return None
     if len(nickname) > NICKNAME_MAX_LENGTH:
         raise ApiError(422, "nickname_too_long", f"O vulgo pode ter até {NICKNAME_MAX_LENGTH} caracteres.")
-    if has_hidden_characters(nickname):
-        raise ApiError(422, "nickname_invalid", "O vulgo não pode ter caracteres invisíveis ou de controle.")
+    if has_hidden_characters(nickname) or mixes_scripts(nickname):
+        raise ApiError(
+            422, "nickname_invalid", "O vulgo não pode ter caracteres invisíveis nem misturar alfabetos."
+        )
+    if not has_visible_text(nickname):
+        raise ApiError(422, "nickname_invalid", "O vulgo precisa ter letras ou números.")
     if uses_authority_word(nickname):
         raise ApiError(
             422, "nickname_reserved", "O vulgo não pode usar palavras como Flyer, admin, suporte ou moderação."
@@ -309,21 +325,51 @@ async def signup(request: Request, body: SignupIn, db: DbServiceDep) -> SignupOu
     # The ticket first: until it exists the new account counts as "being created".
     ticket = secrets.token_urlsafe(32)
     await db.create_signup_ticket(user_id, _ticket_hash(ticket))
-    await _save_chosen_identity(db, user_id, username, nickname)
+    await _save_chosen_identity(db, user_id, username or await _username_from_name(db, body.name), nickname)
     return SignupOut(ticket=ticket)
 
 
+async def _username_from_name(db: DbServiceDep, name: str | None) -> str | None:
+    """A free @username made from the name, if it passes the same checks as a chosen one;
+    None keeps the neutral one (the name reached Supabase Auth unchecked)."""
+    if not name:
+        return None
+    try:
+        candidate = await db.generate_username(name)
+        if not candidate or candidate.startswith("usuario") or username_problem(candidate):
+            return None
+        await _check_public_texts(username=candidate)
+    except Exception:  # noqa: BLE001 — refused, moderation down or no database: keep the neutral one
+        return None
+    return candidate
+
+
+async def _adopt_name_username(db: DbServiceDep, user_id: str) -> None:
+    """An account created outside the backend (Google, or Supabase Auth called directly)
+    comes here first: its neutral @username becomes one made from the name, once that
+    passes the checks. Best effort."""
+    try:
+        current = await db.get_my_profile(user_id)
+        if not NEUTRAL_USERNAME.fullmatch(str(current.get("username") or "")):
+            return
+        candidate = await _username_from_name(db, current.get("name"))
+        if candidate:
+            await db.update_own_profile(user_id, {"username": candidate})
+    except Exception as exc:  # noqa: BLE001 — they can choose one in "Meus dados"
+        logger.warning("Setting the @username from the name failed (%s)", type(exc).__name__)
+
+
 async def _save_chosen_identity(db: DbServiceDep, user_id: str, username: str | None, nickname: str | None) -> None:
-    """The @username and nickname chosen at sign-up, already moderated. Never through the
+    """The @username and nickname of a sign-up, already checked. Never through the
     sign-up metadata, which Supabase Auth stores as given. Best effort: the account keeps
-    the @username made from the name, and both can be set in "Meus dados"."""
+    its neutral @username, and both can be set in "Meus dados"."""
     data = {key: value for key, value in (("username", username), ("nickname", nickname)) if value}
     if not data:
         return
     try:
         await db.update_own_profile(user_id, data)
     except UniqueViolationError:
-        # The @username was taken a moment ago: keep the one made from the name.
+        # The @username was taken a moment ago: keep the neutral one.
         if nickname:
             await _save_chosen_identity(db, user_id, None, nickname)
     except Exception as exc:  # noqa: BLE001
@@ -407,6 +453,7 @@ async def complete_profile(
             detail="O cadastro já está completo: o CPF não pode ser alterado por aqui.",
         )
     remember_complete_profile(user_id)
+    await _adopt_name_username(db, user_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
